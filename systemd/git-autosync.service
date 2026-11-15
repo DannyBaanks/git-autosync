@@ -1,0 +1,13 @@
+[Unit]
+Description=git-autosync v2: rama por defecto de cada repo al dia con origin (solo fast-forward demostrablemente seguro)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/git-autosync
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=20min
+# SIGTERM solo al proceso principal: deja terminar el fast-forward en curso y no inicia mas.
+KillMode=mixed
+TimeoutStopSec=45

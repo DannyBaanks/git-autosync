@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""git-autosync report — que trabajo solo vive en este equipo, que main se ensucio,
+que lleva dias bloqueado y en que estado esta la compuerta de salida (repo-engine).
+
+SOLO LECTURA: no hace fetch, no escribe en ningun repositorio. Parte de la ultima
+corrida del sincronizador (last.tsv) y de las refs locales.
+
+  git-autosync report            imprime el reporte y lo guarda en el estado
+  git-autosync report --notify   ademas avisa por escritorio si el resumen cambio
+  git-autosync report --no-audit no consulta el veredicto de salida de repo-engine
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+HOME = Path.home()
+CONF = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "git-autosync"
+STATE = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "git-autosync"
+ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C", GIT_TERMINAL_PROMPT="0")
+NOW = time.time()
+
+
+def git(d: str, *args: str, timeout: int = 90) -> tuple[int, str]:
+    try:
+        r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True,
+                           errors="replace", env=ENV, timeout=timeout)
+        return r.returncode, r.stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return 124, ""
+
+
+def repo_engine_entry() -> Path | None:
+    raw = os.environ.get("GIT_AUTOSYNC_REPO_ENGINE")
+    if raw is None and (CONF / "repo-engine").is_file():
+        raw = (CONF / "repo-engine").read_text().strip()
+    p = Path(raw).expanduser() if raw else HOME / "Development/ISyCo/tools/repo-engine/repo-engine.py"
+    return p if p.is_file() else None
+
+
+def hook_state(hook: Path) -> str:
+    """OK / FALTA / AJENO / ROTO(motivo). Git ignora en silencio un hook sin permiso de ejecucion, y uno
+    que apunta a un interprete o script inexistente no protege nada. Las variables no cuentan como error."""
+    if not hook.is_file():
+        return "FALTA"
+    if not os.access(hook, os.X_OK):
+        return "ROTO(sin permiso de ejecucion: git lo ignora)"
+    text = hook.read_text(errors="replace")
+    # husky 9: .husky/_/<hook> es un despachador que ejecuta .husky/<hook> con `sh -e`
+    # (ese script no necesita bit de ejecucion).
+    if re.search(r'\.\s+"\$\(dirname "\$0"\)/h"', text):
+        script = hook.parent.parent / hook.name
+        if not script.is_file():
+            return "FALTA(husky sin script)"
+        text = script.read_text(errors="replace")
+    if "repo-engine" not in text:
+        return "AJENO(no invoca repo-engine)"
+    for line in text.splitlines():
+        if line.lstrip().startswith("#") or "repo-engine" not in line:
+            continue
+        paths = []
+        # Entre comillas la ruta puede tener espacios; fuera de comillas termina en el espacio.
+        for dq, sq in re.findall(r""""([^"]*)"|'([^']*)'""", line):
+            m = re.search(r"(?:[A-Za-z]:)?/[^}]*", dq or sq)
+            if m and "$" not in m.group(0):
+                paths.append(m.group(0))
+        bare = re.sub(r""""[^"]*"|'[^']*'""", " ", line)
+        paths += [p for p in re.findall(r"(?:[A-Za-z]:)?/[^\s};|&)]+", bare) if "$" not in p]
+        for path in paths:
+            if not Path(path).exists():
+                return f"ROTO(ruta inexistente: {path[:60]})"
+    return "OK"
+
+
+def scan(row: list[str]) -> dict:
+    status, name, default, _old, _new, _ms, d, reason = (row + [""] * 8)[:8]
+    info: dict = {"name": name, "dir": d, "status": status, "default": default, "reason": reason,
+                  "branches": [], "worktrees": [], "stash": 0, "total_unpub": 0, "commits": 0,
+                  "last": "", "engine": None, "pr_flow": False, "error": None}
+    if not Path(d).is_dir():
+        info["error"] = "el directorio ya no existe"
+        return info
+
+    # worktrees
+    rc, out = git(d, "worktree", "list", "--porcelain")
+    cur: dict = {}
+    for line in out.splitlines() + [""]:
+        if line.startswith("worktree "):
+            cur = {"path": line[9:], "branch": None, "prunable": False}
+        elif line.startswith("branch "):
+            cur["branch"] = line[7:].removeprefix("refs/heads/")
+        elif line.startswith("prunable"):
+            cur["prunable"] = True
+        elif line.startswith("bare"):
+            cur["bare"] = True
+        elif not line and cur:
+            info["worktrees"].append(cur)
+            cur = {}
+    open_in = {w["branch"]: w["path"] for w in info["worktrees"] if w["branch"]}
+
+    for w in info["worktrees"]:
+        w["mod"] = w["untracked"] = 0
+        if w.get("bare") or not Path(w["path"]).is_dir():
+            w["missing"] = not w.get("bare")
+            continue
+        rc, out = git(w["path"], "status", "--porcelain")
+        if rc == 0:
+            lines = [l for l in out.splitlines() if l]
+            w["untracked"] = sum(1 for l in lines if l.startswith("??"))
+            w["mod"] = len(lines) - w["untracked"]
+        else:
+            w["mod"] = w["untracked"] = -1
+
+    rc, out = git(d, "rev-list", "--count", "--all")
+    info["commits"] = int(out.strip() or 0) if rc == 0 else 0
+    rc, out = git(d, "log", "-1", "--all", "--format=%cs")
+    info["last"] = out.strip()
+    rc, out = git(d, "rev-list", "-g", "--count", "refs/stash")
+    info["stash"] = int(out.strip() or 0) if rc == 0 else 0
+
+    # commits que no existen en NINGUN remoto
+    rc, out = git(d, "rev-list", "--count", "--branches", "--not", "--remotes")
+    info["total_unpub"] = int(out.strip() or 0) if rc == 0 else 0
+    if info["total_unpub"]:
+        rc, out = git(d, "for-each-ref", "refs/heads",
+                      "--format=%(refname:short)%09%(upstream:short)%09%(committerdate:short)%09%(upstream:track)")
+        for line in out.splitlines():
+            b, up, date, track = (line.split("\t") + ["", "", "", ""])[:4]
+            rc2, n = git(d, "rev-list", "--count", f"refs/heads/{b}", "--not", "--remotes")
+            n = int(n.strip() or 0) if rc2 == 0 else 0
+            if n:
+                info["branches"].append({"branch": b, "n": n, "upstream": up, "date": date,
+                                         "gone": "gone" in track, "open": open_in.get(b)})
+
+    if default and default != "-":
+        rc, out = git(d, "log", "-30", "--format=%s", f"refs/remotes/origin/{default}")
+        hits = sum(1 for s in out.splitlines()
+                   if re.match(r"Merge pull request #\d+", s) or re.search(r"\(#\d+\)$", s))
+        info["pr_flow"] = hits >= 2
+
+    # repo-engine: marcador + salud de hooks donde git realmente los busca:
+    # core.hooksPath (p.ej. .githooks, .husky/_) o, si no hay, <git-dir comun>/hooks.
+    if (Path(d) / ".repo-engine.toml").is_file():
+        # `--git-path hooks` ya resuelve core.hooksPath (solo lectura, sin `git config`).
+        rc, hp = git(d, "rev-parse", "--path-format=absolute", "--git-path", "hooks")
+        hooks = Path(hp.strip())
+        info["engine"] = {"pre-commit": hook_state(hooks / "pre-commit"),
+                          "pre-push": hook_state(hooks / "pre-push"), "verdict": None}
+    return info
+
+
+def outgoing_verdict(entry: Path, wt: str) -> str:
+    """Veredicto de la compuerta de salida sobre lo que este checkout tiene sin subir (solo lectura)."""
+    try:
+        r = subprocess.run([sys.executable, "-B", str(entry), "audit", "--repo", wt, "--format", "json"],
+                           capture_output=True, text=True, errors="replace", timeout=120, cwd="/", env=ENV)
+        data = json.loads(r.stdout.strip().splitlines()[-1])
+        s = data.get("summary", {})
+        st = data.get("status", "?")
+        return st if st == "CLEAN" else f"{st} (criticos={s.get('critical', 0)}, avisos={s.get('warning', 0)})"
+    except subprocess.TimeoutExpired:
+        return "SIN_VEREDICTO (tardo mas de 120 s)"
+    except Exception as e:  # noqa: BLE001 — cualquier fallo es "sin veredicto", nunca un PASS
+        return f"SIN_VEREDICTO ({type(e).__name__})"
+
+
+def age(seconds: float) -> str:
+    if seconds < 120:
+        return f"{int(seconds)} s"
+    if seconds < 7200:
+        return f"{int(seconds // 60)} min"
+    if seconds < 172800:
+        return f"{int(seconds // 3600)} h"
+    return f"{int(seconds // 86400)} dias"
+
+
+def main() -> int:
+    args = set(sys.argv[1:])
+    if args & {"-h", "--help"}:
+        print(__doc__)
+        return 0
+    last = STATE / "last.tsv"
+    if not last.is_file():
+        print("aun no hay corridas del sincronizador: ejecuta `git-autosync` primero")
+        return 1
+    rows = [l.split("\t") for l in last.read_text(errors="replace").splitlines() if l]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        infos = sorted(ex.map(scan, rows), key=lambda i: i["name"].lower())
+
+    entry = repo_engine_entry()
+    if entry and "--no-audit" not in args:
+        jobs = []
+        for i in infos:
+            if not i["engine"]:
+                continue
+            main_wt = next((w for w in i["worktrees"] if w["path"] == i["dir"]), None)
+            if main_wt and any(b["branch"] == main_wt["branch"] and b["upstream"] for b in i["branches"]):
+                jobs.append(i)
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for i, v in zip(jobs, ex.map(lambda i: outgoing_verdict(entry, i["dir"]), jobs)):
+                i["engine"]["verdict"] = v
+
+    out: list[str] = []
+    p = out.append
+    p(f"git-autosync report — {time.strftime('%F %H:%M')}   (solo lectura; refs locales tal como quedaron en la ultima sincronizacion)")
+
+    # ── salud del sincronizador
+    sync_age = NOW - last.stat().st_mtime
+    timer = subprocess.run(["systemctl", "--user", "is-active", "git-autosync.timer"],
+                           capture_output=True, text=True).stdout.strip() or "desconocido"
+    warn = "  ⚠ SIN CORRIDAS RECIENTES" if sync_age > 3 * 3600 else ""
+    p(f"\nSINCRONIZADOR: timer {timer}; ultima corrida hace {age(sync_age)}; {len(infos)} repos{warn}")
+
+    # ── 1. trabajo que solo vive aqui
+    no_remote = [i for i in infos if i["status"] == "NO_REMOTE"]
+    missing = [i for i in infos if i["status"] == "REMOTE_MISSING"]
+    archived = [i for i in infos if i["status"] == "ARCHIVED"]
+    unpub = [i for i in infos if i["branches"] and i["status"] not in ("NO_REMOTE", "ARCHIVED")]
+    n_br = sum(len(i["branches"]) for i in unpub)
+    stashes = [i for i in infos if i["stash"]]
+    dirty = [(i, w) for i in infos for w in i["worktrees"] if w.get("mod", 0) > 0]
+
+    p("\n1. TRABAJO QUE SOLO VIVE EN ESTE EQUIPO")
+    p(f"\n 1a. Repos sin remoto: {len(no_remote)}  (todo su historial existe solo aqui)")
+    for i in no_remote:
+        mod = sum(max(w.get("mod", 0), 0) for w in i["worktrees"])
+        p(f"     {i['name'][:34]:<34} {i['commits']:>5} commits  ultimo {i['last'] or '-':<10}  sin commit: {mod}")
+    p(f"\n 1b. Remoto que ya no responde: {len(missing)}  (GitHub da 404; lo local puede ser la unica copia)")
+    for i in missing:
+        extra = f"  +{i['total_unpub']} commits que nunca se subieron" if i["total_unpub"] else ""
+        p(f"     {i['name'][:34]:<34} {i['commits']:>5} commits  ultimo {i['last'] or '-':<10}{extra}")
+    p(f"\n 1b'. Archivados (remoto borrado a proposito): {len(archived)}  — ESTA ES LA UNICA COPIA; respaldala si la quieres conservar")
+    for i in archived:
+        mod = sum(max(w.get("mod", 0), 0) for w in i["worktrees"])
+        extra = f"  +{i['total_unpub']} commits que nunca se subieron" if i["total_unpub"] else ""
+        p(f"     {i['name'][:34]:<34} {i['commits']:>5} commits  ultimo {i['last'] or '-':<10}  sin commit: {mod}{extra}")
+    if missing:
+        p("     (si un remoto caido es un hackathon que borraste: git-autosync archive <NombreDeCarpeta>)")
+    p(f"\n 1c. Commits que no estan en ningun remoto: {n_br} rama(s) en {len(unpub)} repo(s)")
+    for i in unpub:
+        for b in sorted(i["branches"], key=lambda b: -b["n"]):
+            up = "upstream borrado" if b["gone"] else (b["upstream"] or "SIN UPSTREAM (nunca subida)")
+            where = f"abierta en {Path(b['open']).name}" if b["open"] else "no abierta"
+            p(f"     {i['name'][:30]:<30} {b['branch'][:38]:<38} +{b['n']:<4} {b['date']}  {up}; {where}")
+    p(f"\n 1d. Stashes: {sum(i['stash'] for i in stashes)} en {len(stashes)} repo(s)")
+    for i in stashes:
+        p(f"     {i['name'][:34]:<34} {i['stash']} stash(es)")
+    p(f"\n 1e. Checkouts con archivos rastreados modificados sin commit: {len(dirty)}")
+    for i, w in sorted(dirty, key=lambda t: -t[1]["mod"]):
+        label = i["name"] if w["path"] == i["dir"] else f"{i['name']} › {Path(w['path']).name}"
+        p(f"     {label[:52]:<52} [{(w['branch'] or 'HEAD separado')[:28]:<28}] modificados={w['mod']:<5} sin rastrear={w['untracked']}")
+
+    # ── 2. rama por defecto ensuciada
+    soiled = [i for i in infos if i["status"] in ("AHEAD", "DIVERGED")]
+    p(f"\n2. RAMA POR DEFECTO CON COMMITS PROPIOS: {len(soiled)}")
+    for i in soiled:
+        flag = "integra por PR → mover a una rama" if i["pr_flow"] else "push directo habitual"
+        p(f"     {i['status']:<9} {i['name'][:30]:<30} {i['default']:<8} {flag} — {i['reason'][:80]}")
+
+    # ── 3. bloqueos
+    blocked = []
+    bf = STATE / "blocked.tsv"
+    if bf.is_file():
+        for l in bf.read_text(errors="replace").splitlines():
+            f = l.split("\t")
+            if len(f) >= 5:
+                blocked.append((f[0], f[1], NOW - float(f[2]), f[4]))
+    p(f"\n3. REPOS BLOQUEADOS (no pueden avanzar): {len(blocked)}")
+    for name, st, secs, reason in sorted(blocked, key=lambda t: -t[2]):
+        p(f"     {name[:30]:<30} {st:<11} desde hace {age(secs):<8} {reason[:90]}")
+    gone_wt = [(i, w) for i in infos for w in i["worktrees"] if w.get("missing")]
+    if gone_wt:
+        p(f"\n   Worktrees registrados cuyo directorio ya no existe: {len(gone_wt)} (su rama sigue 'ocupada' para git)")
+        for i, w in gone_wt:
+            p(f"     {i['name'][:30]:<30} {w['path']}  [{w['branch'] or 'HEAD separado'}]")
+
+    # ── 4. compuerta de salida
+    reg = [i for i in infos if i["engine"]]
+    broken = [i for i in reg if not (i["engine"]["pre-commit"] == "OK" and i["engine"]["pre-push"] == "OK")]
+    p(f"\n4. REPO-ENGINE (compuerta de salida): {len(reg)} repo(s) registrados; hooks sanos en {len(reg) - len(broken)}, rotos o ausentes en {len(broken)}")
+    if entry is None:
+        p("     ⚠ no encuentro repo-engine.py: sin veredictos de salida")
+    for i in reg:
+        e = i["engine"]
+        hooks = "hooks OK" if i not in broken else f"pre-commit={e['pre-commit']}  pre-push={e['pre-push']}"
+        verdict = f"  | lo pendiente de subir: {e['verdict']}" if e["verdict"] else ""
+        p(f"     {i['name'][:30]:<30} {hooks}{verdict}")
+    # Registro de repo-engine frente al disco (solo lectura).
+    if entry is not None:
+        regfile = entry.parent / "state" / "registry.json"
+        try:
+            listed = list(json.loads(regfile.read_text()).get("repos", {}))
+        except Exception:  # noqa: BLE001
+            listed = None
+        if listed is None:
+            p(f"   ⚠ no pude leer el registro {regfile}")
+        else:
+            here = {str(Path(i["dir"]).resolve()) for i in reg}
+            stale = [r for r in listed if not Path(r).is_dir()]
+            missing_reg = sorted(Path(i["dir"]).name for i in reg if str(Path(i["dir"]).resolve()) not in listed)
+            tmp = sum(1 for r in stale if "pytest-of-" in r)
+            win = sum(1 for r in stale if "pytest-of-" not in r and re.match(r"^[A-Za-z]:", r))
+            p(f"   Registro de repo-engine: {len(listed)} entradas; {len(stale)} apuntan a rutas inexistentes "
+              f"({win} repos con ruta de Windows, {tmp} restos de pruebas de pytest, {len(stale) - win - tmp} otras); {len(missing_reg)} repos con marcador no figuran en el registro")
+            if missing_reg:
+                p("     sin registrar: " + ", ".join(missing_reg))
+    unreg = [i for i in unpub if not i["engine"]]
+    p(f"   Repos con commits sin subir y SIN registrar en repo-engine: {len(unreg)} (sus push no pasan por la compuerta)")
+
+    errs = [i for i in infos if i["error"]]
+    for i in errs:
+        p(f"\n   ⚠ {i['name']}: {i['error']}")
+
+    summary = (f"{len(no_remote)} repos sin remoto, {len(missing)} con remoto caido, {len(archived)} archivados (unica copia), "
+               f"{n_br} ramas con commits solo locales en {len(unpub)} repos, "
+               f"{len(dirty)} checkouts con cambios sin commit, {len(soiled)} main con commits propios, "
+               f"{len(blocked)} bloqueados, repo-engine: {len(broken)}/{len(reg)} con hooks rotos")
+    p(f"\nRESUMEN: {summary}")
+    text = "\n".join(out) + "\n"
+    sys.stdout.write(text)
+
+    STATE.mkdir(parents=True, exist_ok=True)
+    (STATE / "report.txt").write_text(text)
+    if "--notify" in args:
+        fp = hashlib.sha256(summary.encode()).hexdigest()
+        prev = (STATE / "report.fp").read_text().strip() if (STATE / "report.fp").is_file() else ""
+        cmd = os.environ.get("GIT_AUTOSYNC_NOTIFY_CMD", "notify-send")
+        if fp != prev and os.environ.get("GIT_AUTOSYNC_NOTIFY", "1") == "1" and shutil.which(cmd):
+            subprocess.run([cmd, "-a", "git-autosync", "Reporte diario: trabajo solo local",
+                            summary + "\nDetalle: git-autosync report"], check=False)
+        (STATE / "report.fp").write_text(fp + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

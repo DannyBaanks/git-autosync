@@ -1,0 +1,27 @@
+name: tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  gates:
+    # Repos y remotos temporales: fast-forward seguro, DENY en todo lo demas, carreras,
+    # SIGTERM/SIGKILL, dry-run sin escrituras, reporte de solo lectura.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n git-autosync && bash -n tests/gates.sh && python3 -m py_compile git-autosync-report
+      - run: tests/gates.sh "$PWD/git-autosync"
+  repo-engine:
+    # Compuerta de publicacion sobre lo que agrega cada PR / push (DannyBaanks/repo-engine).
+    if: github.event_name == 'pull_request' || github.event.before != '0000000000000000000000000000000000000000'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: DannyBaanks/repo-engine@34eb4777467ea5d19796f4eea7b9b99aa01bb124
+        with:
+          base: ${{ github.event.pull_request.base.sha || github.event.before }}
+          head: ${{ github.event.pull_request.head.sha || github.sha }}

@@ -1,0 +1,10 @@
+[Unit]
+Description=git-autosync report diario
+
+[Timer]
+OnCalendar=*-*-* 10:00
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

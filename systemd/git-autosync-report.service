@@ -1,0 +1,10 @@
+[Unit]
+Description=git-autosync report: trabajo que solo vive en este equipo, main ensuciadas, bloqueos y salud de repo-engine (solo lectura)
+After=git-autosync.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/git-autosync report --notify
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=15min

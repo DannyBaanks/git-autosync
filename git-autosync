@@ -1,0 +1,559 @@
+#!/usr/bin/env bash
+# git-autosync v2 — mantiene la rama por defecto de cada repo local al dia con
+# origin, SOLO por fast-forward y solo cuando se puede demostrar que es seguro.
+#
+# Contrato de autoridad (lo unico que este programa modifica):
+#   - refs remotas (refs/remotes/origin/*) mediante `git fetch`
+#   - la rama local por defecto, avanzandola por fast-forward:
+#       * rama NO abierta en ningun worktree -> update-ref atomico (CAS de SHA)
+#       * rama abierta en un worktree        -> merge --ff-only, solo si el
+#         arbol esta limpio, nada chocaria, no hay operacion a medias y ningun
+#         proceso esta usando ese checkout
+#   Nunca: reset, clean, stash, rebase, push, checkout/switch, merge commits,
+#   prune, --force, hooks del repo, reinicio de servicios.
+#   Ante cualquier duda: DENY con el motivo.
+#
+# Uso:
+#   git-autosync              sincroniza
+#   git-autosync --dry-run    solo observa (ls-remote) y predice; no escribe nada en los repos
+#   git-autosync status [--all]   resultado de la ultima corrida
+#   git-autosync log [N] [--all]  historial (cambios de estado; --all incluye resumenes)
+#   git-autosync archive NOMBRE   marca un repo cuyo remoto borraste a proposito
+#   git-autosync report [--notify] [--no-audit]
+#                             que trabajo solo vive en este equipo, main ensuciadas,
+#                             bloqueos prolongados y estado de repo-engine (solo lectura)
+#   git-autosync --version
+#
+# Config opcional en ~/.config/git-autosync/ (una entrada por linea, # comenta):
+#   roots       carpetas a vigilar (por defecto ~/Development/ISyCo Git)
+#   exclude     globs de nombre de carpeta a ignorar por completo
+#   pin         globs de repos donde solo se hace fetch (la rama nunca se mueve)
+#   archived    globs de repos cuyo remoto borraste a proposito (hackathones terminados): no se
+#               contactan ni alarman; el reporte los lista como UNICA copia
+#   allow-busy  globs de repos cuyo checkout puede avanzar aunque haya procesos usandolo
+#   pr-flow     globs de repos que integran por PR (aviso al commitear directo en la rama por defecto);
+#               sin este archivo se deduce del historial de origin
+#   repo-engine ruta a repo-engine.py (por defecto ~/Development/ISyCo/tools/repo-engine/repo-engine.py)
+set -u
+VERSION=2.2.1
+SELF=$(readlink -f "$0")
+
+export LC_ALL=C
+export CONF="${XDG_CONFIG_HOME:-$HOME/.config}/git-autosync"
+export STATE="${XDG_STATE_HOME:-$HOME/.local/state}/git-autosync"
+export FETCH_TIMEOUT="${GIT_AUTOSYNC_FETCH_TIMEOUT:-180}"
+JOBS="${GIT_AUTOSYNC_JOBS:-8}"
+export GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never GIT_OPTIONAL_LOCKS=0
+export GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=15"
+
+# git sin hooks del repo y sin gc/mantenimiento automatico.
+g() { git -c core.hooksPath=/dev/null -c gc.auto=0 -c maintenance.auto=false "$@"; }
+
+sanitize() {  # sin credenciales, sin tabs/saltos, acotado
+  sed -E 's#://[^/@[:space:]]+@#://***@#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#***#g' <<<"$*" \
+    | tr '\t\n' '  ' | cut -c1-300
+}
+
+# Punto de pausa SOLO para los gates de concurrencia (requiere GIT_AUTOSYNC_TEST=1).
+tp() {
+  if [ "${GIT_AUTOSYNC_TEST:-}" = 1 ] && [ "${GIT_AUTOSYNC_TEST_PAUSE_AT:-}" = "$1" ]; then
+    # Senal "estoy en pausa en este repo" para que los gates no dependan de sleeps.
+    [ -n "${GIT_AUTOSYNC_TEST_FLAGDIR:-}" ] && : >"$GIT_AUTOSYNC_TEST_FLAGDIR/$NAME"
+    sleep "${GIT_AUTOSYNC_TEST_PAUSE_SECS:-3}"
+  fi
+  return 0
+}
+
+matches() {  # $1 = archivo de globs, $2 = nombre
+  local l
+  [ -f "$CONF/$1" ] || return 1
+  while IFS= read -r l; do
+    [ -n "$l" ] && [ "${l:0:1}" != "#" ] || continue
+    # shellcheck disable=SC2254
+    case "$2" in $l) return 0 ;; esac
+  done <"$CONF/$1"
+  return 1
+}
+
+# ───────────────────────────── un repositorio ─────────────────────────────
+emit() {
+  local st=$1; shift
+  local ms=$(( ($(date +%s%N) - T0) / 1000000 ))
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$st" "$NAME" "${DEF:--}" "${OLD:--}" "${NEW:--}" \
+    "$ms" "$DIR" "$(sanitize "$*")"
+}
+
+classify_fetch() {  # $1 = rc, $2 = salida -> emite y devuelve 0 si es error real
+  local rc=$1 out=$2 url slug
+  if grep -qiE 'repository .*not found|not found' <<<"$out" && grep -qi 'github\.com' <<<"$URL"; then
+    # 404 en GitHub = no existe O no hay permiso. Verificar credenciales antes de concluir.
+    if command -v gh >/dev/null 2>&1; then
+      local who api
+      if who=$(gh api user -q .login 2>&1); then
+        slug=$(sed -E 's#^.*github\.com[:/]##; s#\.git/?$##; s#/$##' <<<"$URL")
+        api=$(gh api "repos/$slug" -q .full_name 2>&1)
+        if grep -q 'HTTP 404' <<<"$api"; then
+          emit REMOTE_MISSING "GitHub responde 404 con credenciales validas ($who): borrado, renombrado o privado sin acceso"
+        elif grep -qiE 'rate limit|HTTP 403|HTTP 429' <<<"$api"; then
+          emit NETWORK_ERROR "limite de peticiones de GitHub (recuperable): $api"
+        else
+          emit UNKNOWN "fetch dice not found pero la API responde: $api"
+        fi
+      elif grep -qiE 'HTTP 401|auth|credential|token' <<<"$who"; then
+        emit AUTH_ERROR "credenciales de GitHub invalidas: $who"
+      else
+        emit NETWORK_ERROR "no pude verificar credenciales (recuperable): $who"
+      fi
+    else
+      emit UNKNOWN "not found sin poder verificar credenciales (gh no instalado)"
+    fi
+  elif [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+    emit NETWORK_ERROR "fetch excedio ${FETCH_TIMEOUT}s (recuperable)"
+  elif grep -qiE 'authentication failed|could not read username|terminal prompts disabled|permission denied|invalid credentials|HTTP 401|error: 401|HTTP 403|error: 403' <<<"$out"; then
+    emit AUTH_ERROR "$(tail -n1 <<<"$out")"
+  elif grep -qiE 'could not resolve|timed out|failed to connect|connection refused|connection reset|network is unreachable|unable to access|early eof|rpc failed|error: 5[0-9][0-9]|HTTP 5[0-9][0-9]|rate limit|HTTP 429|remote end hung up|ssl|tls' <<<"$out"; then
+    emit NETWORK_ERROR "(recuperable) $(tail -n1 <<<"$out")"
+  elif grep -qiE 'does not appear to be a git repository|no such file or directory|not found' <<<"$out"; then
+    emit REMOTE_MISSING "$(tail -n1 <<<"$out")"
+  else
+    emit UNKNOWN "fetch rc=$rc: $(tail -n1 <<<"$out")"
+  fi
+}
+
+# Worktrees: cual tiene abierta la rama por defecto, y si alguno la esta rebasando.
+wt_scan() {
+  WT_DEF=; WT_DEF_N=0; WT_REBASING=
+  local line w= gd f list
+  list=$(g -C "$DIR" worktree list --porcelain 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*)
+        w=${line#worktree }
+        if [ -d "$w" ] && gd=$(g -C "$w" rev-parse --absolute-git-dir 2>/dev/null); then
+          for f in "$gd/rebase-merge/head-name" "$gd/rebase-apply/head-name"; do
+            [ -f "$f" ] && [ "$(cat "$f" 2>/dev/null)" = "refs/heads/$DEF" ] && WT_REBASING=$w
+          done
+        fi ;;
+      "branch refs/heads/$DEF") WT_DEF=$w; WT_DEF_N=$((WT_DEF_N + 1)) ;;
+    esac
+  done <<<"$list"
+  return 0
+}
+
+# Procesos (del usuario) cuyo cwd, ejecutable o argumentos apuntan dentro del checkout.
+busy_procs() {
+  local wt=$1 hits
+  hits=$( {
+    find /proc -maxdepth 2 \( -name cwd -o -name exe \) -path '/proc/[0-9]*' -printf '%h\t%l\n' 2>/dev/null \
+      | awk -F'\t' -v w="$wt" '$2==w || index($2, w "/")==1 {print $1}'
+    grep -lszF -- "$wt/" /proc/[0-9]*/cmdline 2>/dev/null | xargs -r -n1 dirname
+    grep -lszxF -- "$wt" /proc/[0-9]*/cmdline 2>/dev/null | xargs -r -n1 dirname
+  } | sort -u | while IFS= read -r p; do
+        pid=${p#/proc/}
+        # Ignorar este worker y todos sus descendientes (find/grep llevan la ruta en sus argumentos).
+        q=$pid; mine=0
+        while [ -n "$q" ] && [ "$q" -gt 1 ] 2>/dev/null; do
+          [ "$q" = "$$" ] && { mine=1; break; }
+          q=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$q/status" 2>/dev/null)
+        done
+        [ $mine = 1 ] && continue
+        [ -r "$p/comm" ] && printf '%s(%s) ' "$(cat "$p/comm" 2>/dev/null)" "$pid"
+      done )
+  printf '%s' "$hits" | cut -c1-160
+}
+
+# Rutas que el fast-forward crearia y que ya existen en disco (sin rastrear o ignoradas).
+collisions() {
+  local wt=$1 f p
+  g -C "$wt" diff --name-only --no-renames --diff-filter=A -z "$OLD" "$NEW" 2>/dev/null \
+  | while IFS= read -r -d '' f; do
+      if [ -e "$wt/$f" ] || [ -L "$wt/$f" ]; then printf '%s' "$f"; break; fi
+      p=$f
+      while [ "$p" != "${p%/*}" ]; do
+        p=${p%/*}
+        if { [ -e "$wt/$p" ] || [ -L "$wt/$p" ]; } && { [ ! -d "$wt/$p" ] || [ -L "$wt/$p" ]; }; then
+          printf '%s' "$p"; break 2
+        fi
+      done
+    done
+}
+
+# Comprobaciones del checkout que tiene la rama abierta. Devuelve 0 si es seguro.
+checkout_safe() {
+  local wt=$1 gd dirty c op
+  [ -d "$wt" ] || { emit UNKNOWN "el worktree registrado $wt no existe en disco"; return 1; }
+  gd=$(g -C "$wt" rev-parse --absolute-git-dir 2>/dev/null) || { emit UNKNOWN "no pude leer el git-dir de $wt"; return 1; }
+  [ "$(g -C "$wt" symbolic-ref -q HEAD 2>/dev/null)" = "refs/heads/$DEF" ] \
+    || { emit BUSY "el worktree $wt cambio de rama durante la sincronizacion"; return 1; }
+  [ "$(g -C "$wt" rev-parse -q --verify HEAD 2>/dev/null)" = "$OLD" ] \
+    || { emit BUSY "$DEF se movio durante la sincronizacion (commit concurrente); no se toca"; return 1; }
+  [ -e "$gd/index.lock" ] && { emit BUSY "otro proceso git tiene index.lock en $wt"; return 1; }
+  for op in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG rebase-merge rebase-apply; do
+    [ -e "$gd/$op" ] && { emit BUSY "operacion git a medias en $wt ($op)"; return 1; }
+  done
+  dirty=$(g -C "$wt" status --porcelain=v1 --untracked-files=no 2>/dev/null) \
+    || { emit UNKNOWN "git status fallo en $wt"; return 1; }
+  [ -n "$dirty" ] && { emit DIRTY "$(wc -l <<<"$dirty") archivo(s) rastreado(s) con cambios sin commit en $wt (p.ej. $(head -n1 <<<"$dirty" | cut -c4-80))"; return 1; }
+  c=$(collisions "$wt")
+  [ -n "$c" ] && { emit DIRTY "archivo sin rastrear/ignorado chocaria con lo que llega: $c"; return 1; }
+  return 0
+}
+
+sync_one() {
+  DIR=$1; NAME=$(basename "$DIR"); DEF=; OLD=; NEW=; T0=$(date +%s%N)
+  local out rc common lockid marker up_r up_m n a b
+
+  common=$(g -C "$DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    || { emit UNKNOWN "ya no es un repositorio git legible"; return; }
+  lockid=$(printf '%s' "$common" | sha1sum | cut -c1-16)
+  if [ "$DRY" != 1 ]; then
+    exec 8>"$STATE/locks/$lockid"
+    flock -n 8 || { emit BUSY "otra instancia de git-autosync esta trabajando este repo"; return; }
+  fi
+  marker="$STATE/inflight/$lockid"
+
+  [ "$(g -C "$DIR" rev-parse --is-bare-repository 2>/dev/null)" = true ] && { emit UNKNOWN "repositorio bare: se omite"; return; }
+  if matches archived "$NAME"; then
+    emit ARCHIVED "archivado (remoto borrado a proposito): no se contacta GitHub; esta copia local es la unica"; return
+  fi
+  URL=$(g -C "$DIR" remote get-url origin 2>/dev/null) || { emit NO_REMOTE "sin remoto origin"; return; }
+
+  # Un refspec que escriba fuera de refs/remotes/ (p.ej. mirror) haria que fetch pise ramas locales.
+  if [ "$(g -C "$DIR" config --get remote.origin.mirror 2>/dev/null)" = true ] \
+     || g -C "$DIR" config --get-all remote.origin.fetch 2>/dev/null | grep -qvE '^\+?refs/[^:]*:refs/remotes/'; then
+    emit UNKNOWN "refspec de fetch no estandar (escribiria fuera de refs/remotes/): se omite"; return
+  fi
+
+  # Fast-forward anterior que no termino (corte de luz / SIGKILL).
+  if [ -f "$marker" ]; then
+    local m_wt m_old m_new h
+    { IFS= read -r m_wt; IFS= read -r DEF; IFS= read -r m_old; IFS= read -r m_new; } <"$marker"
+    OLD=$m_old; NEW=$m_new
+    h=$(g -C "$m_wt" rev-parse -q --verify HEAD 2>/dev/null)
+    if { [ "$h" = "$m_old" ] || [ "$h" = "$m_new" ]; } \
+       && [ -z "$(g -C "$m_wt" status --porcelain=v1 --untracked-files=no 2>/dev/null)" ]; then
+      [ "$DRY" = 1 ] || rm -f "$marker"      # termino o nunca empezo: estado consistente
+    else
+      emit INTERRUPTED "un fast-forward anterior en $m_wt quedo a medias; el arbol estaba limpio antes, revisar con git status. No se toca hasta resolverlo (luego borrar $marker)"
+      return
+    fi
+    DEF=; OLD=; NEW=
+  fi
+
+  [ -e "$STOPFILE" ] && { emit UNKNOWN "corrida detenida por senal antes de procesar este repo"; return; }
+
+  DEF=$(g -C "$DIR" symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null); DEF=${DEF#origin/}
+
+  if [ "$DRY" = 1 ]; then
+    # Solo observar: ls-remote no escribe nada en el repo.
+    out=$(timeout -k 5 "$FETCH_TIMEOUT" git -C "$DIR" ls-remote --symref origin HEAD 2>&1); rc=$?
+    [ $rc = 0 ] || { classify_fetch "$rc" "$out"; return; }
+    [ -n "$DEF" ] || DEF=$(sed -n 's#^ref: refs/heads/\([^[:space:]]*\)[[:space:]]*HEAD$#\1#p' <<<"$out" | head -n1)
+    [ -n "$DEF" ] || { emit UNKNOWN "origin no anuncia rama por defecto"; return; }
+    NEW=$(timeout -k 5 "$FETCH_TIMEOUT" git -C "$DIR" ls-remote origin "refs/heads/$DEF" 2>/dev/null | cut -f1 | head -n1)
+    [ -n "$NEW" ] || { emit UNKNOWN "origin no tiene la rama $DEF"; return; }
+  else
+    out=$(timeout -k 10 "$FETCH_TIMEOUT" git -c core.hooksPath=/dev/null -c gc.auto=0 -c maintenance.auto=false \
+            -C "$DIR" fetch --quiet --no-prune --no-auto-maintenance --no-write-fetch-head \
+            --recurse-submodules=no origin 2>&1); rc=$?
+    if [ $rc != 0 ] && ! grep -q 'would clobber existing tag' <<<"$out"; then
+      classify_fetch "$rc" "$out"; return
+    fi
+    if [ -z "$DEF" ]; then   # sin origin/HEAD local: preguntar, sin escribir config
+      DEF=$(timeout -k 5 60 git -C "$DIR" ls-remote --symref origin HEAD 2>/dev/null \
+            | sed -n 's#^ref: refs/heads/\([^[:space:]]*\)[[:space:]]*HEAD$#\1#p' | head -n1)
+    fi
+    [ -n "$DEF" ] || { emit UNKNOWN "origin no anuncia rama por defecto"; return; }
+    NEW=$(g -C "$DIR" rev-parse -q --verify "refs/remotes/origin/$DEF^{commit}" 2>/dev/null) \
+      || { NEW=
+           if g -C "$DIR" rev-parse -q --verify "refs/heads/$DEF" >/dev/null 2>&1; then emit UNKNOWN "no existe origin/$DEF en este clon"
+           else emit NO_LOCAL "este clon no tiene la rama $DEF ni origin/$DEF (clon de una sola rama); nada que sincronizar"; fi
+           return; }
+  fi
+
+  OLD=$(g -C "$DIR" rev-parse -q --verify "refs/heads/$DEF^{commit}" 2>/dev/null) \
+    || { OLD=; emit NO_LOCAL "no hay rama local $DEF (no se crea automaticamente)"; return; }
+
+  # La rama local debe seguir a origin/<def> (o a nada); si sigue a otro upstream, no inferir.
+  up_r=$(g -C "$DIR" config --get "branch.$DEF.remote" 2>/dev/null)
+  up_m=$(g -C "$DIR" config --get "branch.$DEF.merge" 2>/dev/null)
+  if { [ -n "$up_r" ] && [ "$up_r" != origin ]; } || { [ -n "$up_m" ] && [ "$up_m" != "refs/heads/$DEF" ]; }; then
+    emit UNKNOWN "la rama local $DEF sigue a ${up_r:-?}/${up_m#refs/heads/}, no a origin/$DEF: no se infiere"; return
+  fi
+
+  [ "$OLD" = "$NEW" ] && { emit UP_TO_DATE "$DEF al dia"; return; }
+
+  if ! g -C "$DIR" cat-file -e "$NEW^{commit}" 2>/dev/null; then   # solo ocurre en dry-run
+    emit WOULD_FETCH "observado: origin/$DEF tiene commits aun no descargados; prediccion: fetch y, si es fast-forward y el checkout es seguro, avance"
+    return
+  fi
+
+  if ! g -C "$DIR" merge-base --is-ancestor "$OLD" "$NEW" 2>/dev/null; then
+    if g -C "$DIR" merge-base --is-ancestor "$NEW" "$OLD" 2>/dev/null; then
+      emit AHEAD "$DEF tiene $(g -C "$DIR" rev-list --count "$NEW..$OLD") commit(s) locales sin subir; nada que bajar"
+    else
+      a=$(g -C "$DIR" rev-list --count "$NEW..$OLD"); b=$(g -C "$DIR" rev-list --count "$OLD..$NEW")
+      emit DIVERGED "$DEF: $a commit(s) solo locales y $b solo en origin; requiere decision humana"
+    fi
+    return
+  fi
+  n=$(g -C "$DIR" rev-list --count "$OLD..$NEW")
+
+  matches pin "$NAME" && { emit PINNED "$DEF +$n pendiente(s); repo fijado en pin: solo fetch"; return; }
+
+  wt_scan || { emit UNKNOWN "no pude listar worktrees"; return; }
+  [ "$WT_DEF_N" -gt 1 ] && { emit UNKNOWN "$DEF aparece abierta en $WT_DEF_N worktrees: estado anomalo"; return; }
+  [ -n "$WT_REBASING" ] && { emit BUSY "$DEF se esta rebasando en $WT_REBASING"; return; }
+
+  if [ -n "$WT_DEF" ]; then
+    # ── La rama esta abierta: tocar el arbol de trabajo solo si es demostrablemente seguro.
+    local wt busy note=
+    wt=$(readlink -f "$WT_DEF")
+    checkout_safe "$wt" || return
+    busy=$(busy_procs "$wt")
+    if [ -n "$busy" ]; then
+      if matches allow-busy "$NAME"; then note=" — habia procesos usando el checkout ($busy): puede requerir reinicio manual"
+      else emit BUSY "$DEF +$n pendiente(s); procesos usando $wt: $busy"; return; fi
+    fi
+    [ "$DRY" = 1 ] && { emit WOULD_UPDATE "prediccion: fast-forward de $DEF +$n en el checkout $wt (comprobaciones de seguridad superadas ahora)"; return; }
+
+    tp before_mutate
+    [ -e "$STOPFILE" ] && { emit UNKNOWN "corrida detenida por senal antes de modificar"; return; }
+    checkout_safe "$wt" || return            # revalidar justo antes de tocar nada
+
+    printf '%s\n%s\n%s\n%s\n%s\n' "$wt" "$DEF" "$OLD" "$NEW" "$(date '+%F %T')" >"$marker"
+    out=$( trap '' INT TERM HUP
+           g -c merge.autoStash=false -C "$wt" merge --ff-only --no-autostash --no-overwrite-ignore \
+             --no-stat --no-edit --quiet "$NEW" 2>&1 ); rc=$?
+    local h; h=$(g -C "$wt" rev-parse -q --verify HEAD 2>/dev/null)
+    if [ "$h" = "$NEW" ] && [ -z "$(g -C "$wt" status --porcelain=v1 --untracked-files=no 2>/dev/null)" ]; then
+      rm -f "$marker"; emit UPDATED "fast-forward de $DEF +$n en el checkout $wt$note"
+    elif [ "$h" = "$OLD" ] && [ -z "$(g -C "$wt" status --porcelain=v1 --untracked-files=no 2>/dev/null)" ]; then
+      rm -f "$marker"
+      if grep -qiE 'lock' <<<"$out"; then emit BUSY "git rechazo el fast-forward: $(head -n1 <<<"$out")"
+      elif grep -qiE 'overwritten|untracked|local changes' <<<"$out"; then emit DIRTY "git rechazo el fast-forward: $(head -n1 <<<"$out")"
+      else emit UNKNOWN "git rechazo el fast-forward (rc=$rc): $(head -n1 <<<"$out")"; fi
+    elif [ "$h" != "$OLD" ] && [ "$h" != "$NEW" ]; then
+      rm -f "$marker"; emit BUSY "$DEF se movio durante el fast-forward (commit concurrente); git no avanzo: $(head -n1 <<<"$out")"
+    else
+      emit INTERRUPTED "el fast-forward en $wt quedo en estado inconsistente (rc=$rc): $(head -n1 <<<"$out")"
+    fi
+  else
+    # ── La rama no esta abierta en ningun sitio: solo se mueve la referencia.
+    [ "$DRY" = 1 ] && { emit WOULD_UPDATE "prediccion: avance atomico de la ref $DEF +$n (rama no abierta; ningun archivo de trabajo cambia)"; return; }
+
+    tp before_mutate
+    [ -e "$STOPFILE" ] && { emit UNKNOWN "corrida detenida por senal antes de modificar"; return; }
+    wt_scan || { emit UNKNOWN "no pude listar worktrees"; return; }
+    [ -n "$WT_DEF" ] && { emit BUSY "$DEF se abrio en $WT_DEF durante la sincronizacion; se reintenta en la proxima corrida"; return; }
+    [ -n "$WT_REBASING" ] && { emit BUSY "$DEF se esta rebasando en $WT_REBASING"; return; }
+
+    # CAS: solo se mueve si la ref sigue valiendo exactamente OLD.
+    if ! out=$(g -C "$DIR" update-ref -m "git-autosync: fast-forward" "refs/heads/$DEF" "$NEW" "$OLD" 2>&1); then
+      emit BUSY "$DEF cambio durante la sincronizacion (CAS rechazado); no se toca: $(head -n1 <<<"$out")"; return
+    fi
+    # Carrera residual: alguien abrio la rama entre la revalidacion y el update-ref.
+    wt_scan
+    if [ -n "$WT_DEF" ] && [ -d "$WT_DEF" ] \
+       && g -C "$WT_DEF" diff --cached --quiet "$OLD" 2>/dev/null \
+       && ! g -C "$WT_DEF" diff --cached --quiet "$NEW" 2>/dev/null; then
+      if g -C "$DIR" update-ref -m "git-autosync: deshacer avance (checkout concurrente)" "refs/heads/$DEF" "$OLD" "$NEW" 2>/dev/null; then
+        emit BUSY "$DEF se abrio en $WT_DEF justo durante el avance; avance deshecho, se reintenta luego"
+      else
+        emit INTERRUPTED "$DEF se abrio en $WT_DEF durante el avance y no pude deshacerlo: revisar git status ahi"
+      fi
+      return
+    fi
+    emit UPDATED "avance atomico de la ref $DEF +$n (rama no abierta; ningun archivo de trabajo cambio)"
+  fi
+}
+
+# ───────────────────────────── presentacion ─────────────────────────────
+ORDER="UPDATED WOULD_UPDATE WOULD_FETCH INTERRUPTED DIVERGED DIRTY BUSY PINNED AUTH_ERROR REMOTE_MISSING NETWORK_ERROR UNKNOWN AHEAD NO_LOCAL NO_REMOTE ARCHIVED"
+ATTENTION='^(INTERRUPTED|DIVERGED|DIRTY|BUSY|AUTH_ERROR|REMOTE_MISSING|UNKNOWN)	'
+
+show() {  # $1 = tsv, $2 = all?
+  local f=$1 k
+  for k in $ORDER ${2:+UP_TO_DATE}; do
+    awk -F'\t' -v k="$k" '$1==k' "$f" | sort -t$'\t' -k2,2 | awk -F'\t' '{
+      sha = ($4!="-" && $5!="-" && $4!=$5) ? substr($4,1,8) ".." substr($5,1,8) : "";
+      printf "  %-14s %-30s %-8s %-18s %6sms  %s\n", $1, substr($2,1,30), substr($3,1,8), sha, $6, $8 }'
+  done
+  awk -F'\t' '{c[$1]++} END {
+    printf "  -- %d al dia, %d actualizados", c["UP_TO_DATE"], c["UPDATED"]+0;
+    n=split("WOULD_UPDATE WOULD_FETCH INTERRUPTED DIVERGED DIRTY BUSY PINNED AHEAD AUTH_ERROR REMOTE_MISSING NETWORK_ERROR UNKNOWN NO_LOCAL NO_REMOTE ARCHIVED", o, " ");
+    for (i=1;i<=n;i++) if (c[o[i]]) printf ", %d %s", c[o[i]], o[i]; printf "\n" }' "$f"
+}
+
+# ───────────────────────────── entrada ─────────────────────────────
+# Worker interno: hereda el modo (real / dry-run) del proceso principal por GAS_DRY.
+if [ "${1:-}" = __one ]; then
+  DRY=${GAS_DRY:-0}; export STOPFILE="${STOPFILE:-/nonexistent}"
+  cd / || exit 1; sync_one "$2"; exit 0
+fi
+DRY=0
+case "${1:-}" in
+  status)
+    [ -f "$STATE/last.tsv" ] || { echo "aun no hay corridas de v2"; exit 0; }
+    echo "ultima corrida: $(date -r "$STATE/last.tsv" '+%F %T')"
+    show "$STATE/last.tsv" "$([ "${2:-}" = --all ] && echo 1)"; exit 0 ;;
+  log)
+    n=40; all=0
+    for a in "${@:2}"; do case "$a" in --all) all=1 ;; *[!0-9]*) ;; *) n=$a ;; esac; done
+    [ -f "$STATE/log.tsv" ] || exit 0
+    if [ $all = 1 ]; then tail -n "$n" "$STATE/log.tsv"; else grep -v $'\tRUN\t' "$STATE/log.tsv" | tail -n "$n"; fi | tr '\t' ' '
+    exit 0 ;;
+  --version) echo "git-autosync $VERSION"; exit 0 ;;
+  report) exec python3 -B "$(dirname "$SELF")/git-autosync-report" "${@:2}" ;;
+  archive)
+    [ -n "${2:-}" ] || { echo "uso: git-autosync archive <NombreDeCarpeta>"; exit 2; }
+    mkdir -p "$CONF"; touch "$CONF/archived"
+    if grep -qxF -- "$2" "$CONF/archived"; then echo "$2 ya estaba archivado"
+    else printf '%s\n' "$2" >>"$CONF/archived"; echo "archivado: $2 (no se contacta su remoto; el reporte lo lista como unica copia)"; fi
+    exit 0 ;;
+  --dry-run|-n) DRY=1 ;;
+  "") ;;
+  *) sed -n '2,38p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
+export GAS_DRY=$DRY
+
+cd / || exit 1          # que el propio sincronizador no cuente como "proceso usando un checkout"
+mkdir -p "$STATE/locks" "$STATE/inflight"
+
+if [ "$DRY" != 1 ]; then
+  exec 9>"$STATE/lock"
+  flock -n 9 || { echo "git-autosync ya esta corriendo (otra corrida tiene el candado)"; exit 0; }
+fi
+
+export STOPFILE="$STATE/stop.$$"
+rm -f "$STATE"/stop.* 2>/dev/null
+STOPPED=0
+on_signal() { STOPPED=1; : >"$STOPFILE"; }
+trap on_signal INT TERM HUP
+
+roots=()
+if [ -f "$CONF/roots" ]; then
+  while IFS= read -r l; do [ -n "$l" ] && [ "${l:0:1}" != "#" ] && roots+=("${l/#\~/$HOME}"); done <"$CONF/roots"
+fi
+[ ${#roots[@]} -gt 0 ] || roots=("$HOME/Development/ISyCo Git")
+
+# Descubrimiento: .git como directorio o como archivo (worktree); un repo por git-dir comun canonico.
+declare -A seen
+repos=()
+for root in "${roots[@]}"; do
+  for gp in "$root"/*/.git; do
+    [ -e "$gp" ] || continue
+    d=${gp%/.git}
+    matches exclude "$(basename "$d")" && continue
+    c=$(g -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+    c=$(readlink -f "$c") || continue
+    [ -n "${seen[$c]:-}" ] && continue
+    seen[$c]=1
+    # Grupo de worktrees: nombrar por el repo principal si es un checkout normal.
+    if [ "$(basename "$c")" = .git ] && [ -d "$(dirname "$c")" ]; then d=$(dirname "$c"); else d=$(readlink -f "$d"); fi
+    matches exclude "$(basename "$d")" && continue
+    repos+=("$d")
+  done
+done
+
+run_start=$(date +%s)
+tmp=$(mktemp "$STATE/run.XXXXXX")
+if [ ${#repos[@]} -gt 0 ]; then
+  printf '%s\0' "${repos[@]}" | xargs -0 -r -P "$JOBS" -n1 "$SELF" __one >"$tmp" &
+  xp=$!
+  # wait se interrumpe con la senal; se vuelve a esperar hasta que los workers terminen solos.
+  until wait "$xp" 2>/dev/null || ! kill -0 "$xp" 2>/dev/null; do :; done
+fi
+rm -f "$STOPFILE"
+
+if [ "$DRY" = 1 ]; then
+  echo "DRY-RUN: nada fue modificado. 'observado' = leido de origin con ls-remote; 'prediccion' = lo que haria una corrida real ahora."
+  show "$tmp"; rm -f "$tmp"; exit 0
+fi
+
+show "$tmp"
+[ $STOPPED = 1 ] && echo "  (corrida detenida por senal: los repos no procesados se reintentan en la proxima)"
+
+# Historial: toda actualizacion, y los demas estados solo cuando cambian respecto a la corrida anterior.
+ts=$(date '+%F %T')
+prev="$STATE/last.tsv"; [ -f "$prev" ] || prev=/dev/null
+awk -F'\t' -v ts="$ts" 'FILENAME==ARGV[1] {p[$2]=$1; next}
+  $1=="UPDATED" || ($1!="UP_TO_DATE" && p[$2]!=$1) || ($1=="UP_TO_DATE" && ($2 in p) && p[$2]!="UP_TO_DATE" && p[$2]!="UPDATED") {
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%sms\t%s\n", ts, $1, $2, $3, substr($4,1,12), substr($5,1,12), $6, $8 }' \
+  "$prev" "$tmp" >>"$STATE/log.tsv"
+printf '%s\tRUN\t%d repos\t%ss\t%s\n' "$ts" "${#repos[@]}" "$(( $(date +%s) - run_start ))" \
+  "$(cut -f1 "$tmp" | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')" >>"$STATE/log.tsv"
+if [ "$(wc -l <"$STATE/log.tsv")" -gt 5000 ]; then
+  tail -n 3000 "$STATE/log.tsv" >"$STATE/log.tsv.tmp" && mv "$STATE/log.tsv.tmp" "$STATE/log.tsv"
+fi
+
+# ── Avisos. Regla: se notifica un CAMBIO de estado, nunca un estado que sigue igual.
+NOTIFY="${GIT_AUTOSYNC_NOTIFY_CMD:-notify-send}"
+notify() {
+  [ "${GIT_AUTOSYNC_NOTIFY:-1}" = 1 ] && command -v "$NOTIFY" >/dev/null 2>&1 \
+    && "$NOTIFY" -a git-autosync "$1" "$2" 2>/dev/null
+  return 0
+}
+now=$(date +%s)
+[ "${GIT_AUTOSYNC_TEST:-}" = 1 ] && [ -n "${GIT_AUTOSYNC_TEST_NOW:-}" ] && now=$GIT_AUTOSYNC_TEST_NOW
+
+# 1) Lo actualizado.
+upd=$(awk -F'\t' '$1=="UPDATED" {print $2 ": " $3 " " substr($4,1,7) ".." substr($5,1,7)}' "$tmp" | head -n 12)
+[ -n "$upd" ] && notify "Repos actualizados" "$upd"
+
+# 2) Bloqueos nuevos.
+grep -E "$ATTENTION" "$tmp" | awk -F'\t' '{print $1 "|" $2}' | sort >"$STATE/attention.new"
+touch "$STATE/attention"
+fresh=$(comm -13 "$STATE/attention" "$STATE/attention.new")
+if [ -n "$fresh" ]; then
+  body=$(while IFS='|' read -r st nm; do
+           awk -F'\t' -v s="$st" -v n="$nm" '$1==s && $2==n {print n ": " s " — " substr($8,1,110)}' "$tmp"
+         done <<<"$fresh" | head -n 10)
+  notify "Repos bloqueados (nuevo)" "$body"
+fi
+mv "$STATE/attention.new" "$STATE/attention"
+
+# 3) Divergencia en su nacimiento: la rama por defecto acaba de recibir un commit propio
+#    en un repo que integra por PR. Todavia es barato moverlo a una rama.
+is_pr_flow() {  # $1 nombre, $2 dir, $3 rama
+  matches pr-flow "$1" && return 0
+  [ -f "$CONF/pr-flow" ] && return 1
+  [ "$(git -C "$2" log -30 --format=%s "refs/remotes/origin/$3" 2>/dev/null \
+       | grep -cE '^Merge pull request #[0-9]+|\(#[0-9]+\)$')" -ge 2 ]
+}
+if [ "$prev" != /dev/null ]; then
+  direct=$(awk -F'\t' 'FILENAME==ARGV[1] {p[$2]=$1; next}
+             $1=="AHEAD" && ($2 in p) && p[$2]!="AHEAD" && p[$2]!="DIVERGED" {print $2 "\t" $3 "\t" $7 "\t" $8}' "$prev" "$tmp" \
+           | while IFS=$'\t' read -r nm br dir why; do
+               is_pr_flow "$nm" "$dir" "$br" || continue
+               printf '%s\tDIRECT_COMMIT\t%s\t%s\t-\t-\t-\tcommit directo en %s de un repo que integra por PR: %s\n' "$ts" "$nm" "$br" "$br" "$why" >>"$STATE/log.tsv"
+               printf '%s: commit directo en %s. Este repo integra por PR: muevelo a una rama antes de que origin avance y diverja.\n' "$nm" "$br"
+             done)
+  [ -n "$direct" ] && notify "Commit directo en la rama por defecto" "$direct"
+fi
+
+# 4) Bloqueo prolongado: desde cuando esta cada repo sin poder avanzar; avisar a los N dias
+#    y recordar cada 7. PINNED es una decision tuya y no cuenta.
+STALE_DAYS="${GIT_AUTOSYNC_STALE_DAYS:-3}"
+touch "$STATE/blocked.tsv"
+awk -F'\t' -v OFS='\t' -v now="$now" 'FILENAME==ARGV[1] {since[$1]=$3; noti[$1]=$4; next}
+  $1 ~ /^(BUSY|DIRTY|INTERRUPTED|DIVERGED)$/ {
+    print $2, $1, (($2 in since) ? since[$2] : now), (($2 in noti) ? noti[$2] : 0), $8 }' \
+  "$STATE/blocked.tsv" "$tmp" >"$STATE/blocked.new"
+stale_all=$(awk -F'\t' -v now="$now" -v d="$STALE_DAYS" '(now-$3) >= d*86400 && ($4==0 || (now-$4) >= 7*86400) {
+          printf "%012d\t%s: %s desde hace %d dias — %s\n", now-$3, $1, $2, (now-$3)/86400, substr($5,1,90) }' "$STATE/blocked.new" \
+        | sort -r | cut -f2-)
+stale=$(head -n 10 <<<"$stale_all")
+extra=$(( $(grep -c . <<<"$stale_all") - 10 ))
+[ "$extra" -gt 0 ] && stale="$stale
+… y $extra mas (git-autosync report)"
+if [ -n "$stale" ]; then
+  notify "Repos bloqueados desde hace dias" "$stale"
+  awk -F'\t' -v OFS='\t' -v now="$now" -v d="$STALE_DAYS" '
+    (now-$3) >= d*86400 && ($4==0 || (now-$4) >= 7*86400) {$4=now} {print}' "$STATE/blocked.new" >"$STATE/blocked.new2" \
+    && mv "$STATE/blocked.new2" "$STATE/blocked.new"
+fi
+mv "$STATE/blocked.new" "$STATE/blocked.tsv"
+
+mv "$tmp" "$STATE/last.tsv"
+exit 0
