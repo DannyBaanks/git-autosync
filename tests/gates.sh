@@ -263,7 +263,7 @@ chmod +x "$ROOT/g40dyn/.git/hooks/pre-commit"; chmod -x "$ROOT/g40dyn/.git/hooks
 mk "g40 espacio"; printf 'phase = "building"\n' >"$ROOT/g40 espacio/.repo-engine.toml"; fake2="$T/dir con espacio/repo-engine.py"; mkdir -p "$T/dir con espacio"; : >"$fake2"
 for h in pre-commit pre-push; do printf '#!/bin/sh\npython3 "%s" gate x --repo "%s"\n' "$fake2" "$ROOT/g40 espacio" >"$ROOT/g40 espacio/.git/hooks/$h"; chmod +x "$ROOT/g40 espacio/.git/hooks/$h"; done
 mk g40hook; printf 'phase = "building"\n' >"$ROOT/g40hook/.repo-engine.toml"
-printf '#!/bin/sh\n"C:/Users/x/python.exe" "C:/Dev/repo-engine.py" gate commit --repo "C:/x"\n' >"$ROOT/g40hook/.git/hooks/pre-commit"; chmod +x "$ROOT/g40hook/.git/hooks/pre-commit"
+printf '#!/bin/sh\n"%s" "C:/Dev/repo-engine.py" gate commit --repo "C:/x"\n' "C:/Us""ers/x/python.exe" >"$ROOT/g40hook/.git/hooks/pre-commit"; chmod +x "$ROOT/g40hook/.git/hooks/pre-commit"
 run
 all0=$(for d in "$ROOT"/*/; do [ -e "$d/.git" ] && [ ! -L "${d%/}" ] && snap "${d%/}" 1; done | sha256sum)
 "$SUT" report >"$T/report.txt" 2>&1; rrc=$?
@@ -324,6 +324,22 @@ run; check "G44 archivado: ARCHIVED y ninguna ref cambio (no hubo fetch)" '[ "$(
 check "G44 archivado: no notifica como bloqueo ni entra en blocked" '! grep -q "g44" "$T/notify.log" && ! grep -qP "^g44\t" "$ST/blocked.tsv"'
 "$SUT" report --no-audit >"$T/report44.txt" 2>&1
 check "G44 reporte: aparece como unica copia con su commit sin subir" 'grep -qE "^ +g44 .*\+1 commits que nunca se subieron" "$T/report44.txt" && grep -q "UNICA COPIA" "$T/report44.txt"'
+
+echo "G47 report --local: solo lo que existe unicamente aqui, con commits y comando sugerido, sin tocar nada"
+mk g47a; mk g47b; mk g47c
+( cd "$ROOT/g47a" && git checkout -q -b feat-sola && echo 1 >a.txt && git add -A && git commit -qm "primer cambio solo local" && echo 2 >b.txt && git add -A && git commit -qm "segundo cambio solo local" )
+( cd "$ROOT/g47b" && git checkout -q -b con-upstream && git push -q -u origin con-upstream 2>/dev/null && echo 3 >c.txt && git add -A && git commit -qm "adelantada del upstream" )
+( cd "$ROOT/g47b" && git checkout -q -b otra-rama && git branch --set-upstream-to=origin/main otra-rama -q && echo 4 >d.txt && git add -A && git commit -qm "upstream con otro nombre" )
+git -C "$ROOT/g47c" remote remove origin
+run; s47=$(for n in g47a g47b g47c; do snap "$ROOT/$n" 1; done | sha256sum)
+"$SUT" report --local >"$T/local47.txt" 2>&1; rc=$?
+s47b=$(for n in g47a g47b g47c; do snap "$ROOT/$n" 1; done | sha256sum)
+check "G47 --local termina bien y no modifica ningun repo" '[ $rc = 0 ] && [ "$s47" = "$s47b" ]'
+check "G47 lista la rama nunca subida con +2, sus commits y push -u" 'grep -qE "g47a +feat-sola +\+2 .*SIN UPSTREAM" "$T/local47.txt" && grep -q "segundo cambio solo local" "$T/local47.txt" && grep -qE "\\$ git -C .*g47a.* push -u origin feat-sola" "$T/local47.txt"'
+check "G47 rama con upstream adelantada: push sin -u" 'grep -qE "g47b +con-upstream +\+1 .*upstream origin/con-upstream" "$T/local47.txt" && grep -qE "\\$ git -C .*g47b.* push origin con-upstream$" "$T/local47.txt"'
+check "G47 upstream con otro nombre: push <remote> rama:destino" 'grep -qE "\\$ git -C .*g47b.* push origin otra-rama:main$" "$T/local47.txt"'
+check "G47 repo sin remoto aparece como unica copia y sin comando" 'grep -qE "^  g47c +sin_remoto" "$T/local47.txt" && ! grep -q "g47c.* push" "$T/local47.txt"'
+check "G47 un repo al dia no aparece" '! grep -q "g47-nada" "$T/local47.txt" && ! grep -qE "^  g01 " "$T/local47.txt"'
 
 echo "G35 autoridad: el codigo del SUT no invoca comandos prohibidos"
 code=$(grep -vE '^\s*#' "$SUT")
