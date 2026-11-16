@@ -19,6 +19,9 @@
 #   git-autosync status [--all]   resultado de la ultima corrida
 #   git-autosync log [N] [--all]  historial (cambios de estado; --all incluye resumenes)
 #   git-autosync archive NOMBRE   marca un repo cuyo remoto borraste a proposito
+#   git-autosync archive --move NOMBRE...   que mueve esos repos a <root>/Archive/ (solo muestra el
+#                             manifiesto; con --yes lo ejecuta). Todo lo que viva en Archive/ se
+#                             trata como archivado: no se contacta GitHub, el reporte lo lista
 #   git-autosync report [--notify] [--no-audit]
 #                             que trabajo solo vive en este equipo, main ensuciadas,
 #                             bloqueos prolongados y estado de repo-engine (solo lectura)
@@ -35,7 +38,7 @@
 #               sin este archivo se deduce del historial de origin
 #   repo-engine ruta a repo-engine.py (por defecto ~/Development/ISyCo/tools/repo-engine/repo-engine.py)
 set -u
-VERSION=2.2.1
+VERSION=2.3.0
 SELF=$(readlink -f "$0")
 
 export LC_ALL=C
@@ -216,6 +219,9 @@ sync_one() {
   if matches archived "$NAME"; then
     emit ARCHIVED "archivado (remoto borrado a proposito): no se contacta GitHub; esta copia local es la unica"; return
   fi
+  case "$DIR" in */Archive/*)
+    emit ARCHIVED "en Archive/ (historico): no se contacta GitHub; esta copia local puede ser la unica"; return ;;
+  esac
   URL=$(g -C "$DIR" remote get-url origin 2>/dev/null) || { emit NO_REMOTE "sin remoto origin"; return; }
 
   # Un refspec que escriba fuera de refs/remotes/ (p.ej. mirror) haria que fetch pise ramas locales.
@@ -392,6 +398,74 @@ if [ "${1:-}" = __one ]; then
   cd / || exit 1; sync_one "$2"; exit 0
 fi
 DRY=0
+load_roots() {
+  local l
+  roots=()
+  if [ -f "$CONF/roots" ]; then
+    while IFS= read -r l; do [ -n "$l" ] && [ "${l:0:1}" != "#" ] && roots+=("${l/#\~/$HOME}"); done <"$CONF/roots"
+  fi
+  [ ${#roots[@]} -gt 0 ] || roots=("$HOME/Development/ISyCo Git")
+}
+
+# archive --move: manifiesto (por defecto) o ejecucion (--yes). Mueve con un rename atomico dentro del
+# mismo sistema de ficheros: nunca copia ni borra. Ante cualquier duda: DENY con el motivo.
+archive_move() {  # $1 = yes(0/1), resto = nombres
+  local yes=$1 name root src dst n_ok=0 n_deny=0 why dirty0 dirty1 head0 head1 sz br procs wts
+  shift
+  load_roots
+  printf '%-34s %-9s %-6s %s\n' REPO ESTADO TAMANO DETALLE
+  for name in "$@"; do
+    why=
+    case "$name" in ""|.|..|Archive|*/*) why="nombre no valido (solo el nombre de la carpeta)" ;; esac
+    src=
+    if [ -z "$why" ]; then
+      for root in "${roots[@]}"; do [ -d "$root/$name" ] && { src="$root/$name"; break; }; done
+      [ -n "$src" ] || why="no existe como carpeta de primer nivel en los roots"
+    fi
+    if [ -z "$why" ]; then
+      dst="$root/Archive/$name"
+      if [ ! -d "$src/.git" ]; then why="no es un repo git (.git no es un directorio; worktree enlazado o no-repo)"
+      elif [ -e "$dst" ] || [ -L "$dst" ]; then why="ya existe $dst"
+      elif [ -L "$src" ]; then why="es un enlace simbolico"
+      else
+        wts=$(g -C "$src" worktree list --porcelain 2>/dev/null | awk '/^worktree /{p=substr($0,10)} /^prunable/{p=""} /^$/{if(p!="")print p; p=""} END{if(p!="")print p}' | grep -vxF -- "$(readlink -f "$src")" | while IFS= read -r w; do [ -d "$w" ] && printf '%s ' "$w"; done)
+        [ -n "$wts" ] && why="tiene worktrees enlazados vivos con rutas absolutas ($wts): moverlos/repararlos a mano"
+        procs=$(busy_procs "$(readlink -f "$src")")
+        [ -z "$why" ] && [ -n "$procs" ] && why="en uso por procesos: $procs"
+        [ -z "$why" ] && [ -e "$src/.git/index.lock" ] && why="index.lock presente"
+        if [ -z "$why" ]; then
+          mkdir -p "$root/Archive" 2>/dev/null
+          [ "$(stat -c %d "$src")" = "$(stat -c %d "$root/Archive")" ] || why="Archive/ esta en otro sistema de ficheros: no se mueve (seria copiar y borrar)"
+        fi
+      fi
+    fi
+    if [ -n "$why" ]; then
+      printf '%-34s %-9s %-6s %s\n' "$name" DENY - "$why"; n_deny=$((n_deny + 1)); continue
+    fi
+    sz=$(du -sh "$src" 2>/dev/null | cut -f1)
+    br=$(g -C "$src" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    dirty0=$(g -C "$src" status --porcelain=v1 2>/dev/null | wc -l)
+    head0=$(g -C "$src" rev-parse -q --verify HEAD 2>/dev/null)
+    if [ "$yes" != 1 ]; then
+      printf '%-34s %-9s %-6s %s\n' "$name" WOULD_MOVE "$sz" "rama=${br:-?} cambios=$dirty0 -> $dst"; n_ok=$((n_ok + 1)); continue
+    fi
+    if mv -nT -- "$src" "$dst" 2>/dev/null && [ ! -e "$src" ]; then
+      head1=$(g -C "$dst" rev-parse -q --verify HEAD 2>/dev/null)
+      dirty1=$(g -C "$dst" status --porcelain=v1 2>/dev/null | wc -l)
+      if [ "$head0" = "$head1" ] && [ "$dirty0" = "$dirty1" ]; then
+        printf '%-34s %-9s %-6s %s\n' "$name" MOVED "$sz" "HEAD ${head1:0:9} y $dirty1 cambios intactos -> $dst"; n_ok=$((n_ok + 1))
+      else
+        printf '%-34s %-9s %-6s %s\n' "$name" VERIFY_FAIL "$sz" "movido a $dst pero HEAD/estado difieren (antes ${head0:0:9}/$dirty0, ahora ${head1:0:9}/$dirty1)"; n_deny=$((n_deny + 1))
+      fi
+    else
+      printf '%-34s %-9s %-6s %s\n' "$name" DENY - "mv fallo; el origen sigue donde estaba"; n_deny=$((n_deny + 1))
+    fi
+  done
+  if [ "$yes" = 1 ]; then echo "-- $n_ok movidos, $n_deny rechazados"
+  else echo "-- MANIFIESTO (no se movio nada): $n_ok se moverian, $n_deny rechazados. Repite con --yes para ejecutar."; fi
+  [ "$n_deny" = 0 ]
+}
+
 case "${1:-}" in
   status)
     [ -f "$STATE/last.tsv" ] || { echo "aun no hay corridas de v2"; exit 0; }
@@ -406,10 +480,18 @@ case "${1:-}" in
   --version) echo "git-autosync $VERSION"; exit 0 ;;
   report) exec python3 -B "$(dirname "$SELF")/git-autosync-report" "${@:2}" ;;
   archive)
-    [ -n "${2:-}" ] || { echo "uso: git-autosync archive <NombreDeCarpeta>"; exit 2; }
+    shift; move=0; yes=0; names=()
+    for a in "$@"; do
+      case "$a" in --move) move=1 ;; --yes) yes=1 ;; -*) echo "opcion desconocida: $a"; exit 2 ;; *) names+=("$a") ;; esac
+    done
+    [ ${#names[@]} -gt 0 ] || { echo "uso: git-autosync archive [--move [--yes]] <NombreDeCarpeta>..."; exit 2; }
+    [ $yes = 0 ] || [ $move = 1 ] || { echo "--yes solo se usa con --move"; exit 2; }
+    if [ $move = 1 ]; then archive_move "$yes" "${names[@]}"; exit $?; fi
     mkdir -p "$CONF"; touch "$CONF/archived"
-    if grep -qxF -- "$2" "$CONF/archived"; then echo "$2 ya estaba archivado"
-    else printf '%s\n' "$2" >>"$CONF/archived"; echo "archivado: $2 (no se contacta su remoto; el reporte lo lista como unica copia)"; fi
+    for nm in "${names[@]}"; do
+      if grep -qxF -- "$nm" "$CONF/archived"; then echo "$nm ya estaba archivado"
+      else printf '%s\n' "$nm" >>"$CONF/archived"; echo "archivado: $nm (no se contacta su remoto; el reporte lo lista como unica copia)"; fi
+    done
     exit 0 ;;
   --dry-run|-n) DRY=1 ;;
   "") ;;
@@ -431,17 +513,13 @@ STOPPED=0
 on_signal() { STOPPED=1; : >"$STOPFILE"; }
 trap on_signal INT TERM HUP
 
-roots=()
-if [ -f "$CONF/roots" ]; then
-  while IFS= read -r l; do [ -n "$l" ] && [ "${l:0:1}" != "#" ] && roots+=("${l/#\~/$HOME}"); done <"$CONF/roots"
-fi
-[ ${#roots[@]} -gt 0 ] || roots=("$HOME/Development/ISyCo Git")
+load_roots
 
 # Descubrimiento: .git como directorio o como archivo (worktree); un repo por git-dir comun canonico.
 declare -A seen
 repos=()
 for root in "${roots[@]}"; do
-  for gp in "$root"/*/.git; do
+  for gp in "$root"/*/.git "$root"/Archive/*/.git; do
     [ -e "$gp" ] || continue
     d=${gp%/.git}
     matches exclude "$(basename "$d")" && continue

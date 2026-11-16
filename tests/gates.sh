@@ -365,6 +365,34 @@ PYEOF
   check "G48 el JS del panel es sintacticamente valido" 'node --check "$T/panel48.js"'
   check "G48 el JS pinta con textContent y nunca con innerHTML" '! grep -qE "innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(" "$T/panel48.js"'
 fi
+echo "G46 archive --move: manifiesto por defecto, rename atomico con --yes, DENY ante duda"
+for n in g46a g46b g46c g46d g46e; do mk $n; done
+( cd "$ROOT/g46a" && echo wip >>f.txt && echo nuevo >sin-rastrear.txt && echo solo >local.txt && git add local.txt && git commit -qm solo )
+git -C "$ROOT/g46a" remote remove origin; rm -rf "$T/remote/g46a.git"
+h45=$(git -C "$ROOT/g46a" rev-parse HEAD); s45=$(snap "$ROOT/g46a")
+run archive --move g46a
+check "G46 sin --yes: solo manifiesto, nada se movio" 'grep -q "WOULD_MOVE" "$T/out.txt" && grep -q "no se movio nada" "$T/out.txt" && [ -d "$ROOT/g46a/.git" ] && [ ! -e "$ROOT/Archive/g46a" ]'
+run archive --move g46a --yes; rc=$?
+check "G46 --yes: movido, el origen desaparece" '[ $rc = 0 ] && grep -q "MOVED" "$T/out.txt" && [ ! -e "$ROOT/g46a" ] && [ -d "$ROOT/Archive/g46a/.git" ]'
+check "G46 --yes: HEAD, cambios y archivos sin rastrear intactos (huella identica)" '[ "$(git -C "$ROOT/Archive/g46a" rev-parse HEAD)" = "$h45" ] && [ "$(snap "$ROOT/Archive/g46a")" = "$s45" ]'
+run; check "G46 el repo en Archive/ aparece como ARCHIVED y sin alarma" '[ "$(st g46a)" = ARCHIVED ] && ! grep -qP "^g46a\t(NO_REMOTE|REMOTE_MISSING)" "$ST/last.tsv"'
+run archive --move g46a --yes; check "G46 repetir es DENY (ya no existe en el root)" '[ $? != 0 ] || grep -q DENY "$T/out.txt"'
+mkdir -p "$ROOT/Archive/g46b"; run archive --move g46b --yes; rc=$?
+check "G46 destino ya existente: DENY y el origen intacto" '[ $rc != 0 ] && grep -q "ya existe" "$T/out.txt" && [ -d "$ROOT/g46b/.git" ]'
+git -C "$ROOT/g46c" worktree add -q "$T/wt46" -b wt46 2>/dev/null
+run archive --move g46c --yes; rc=$?
+check "G46 worktree enlazado vivo: DENY, nada se movio" '[ $rc != 0 ] && grep -q "worktrees enlazados" "$T/out.txt" && [ -d "$ROOT/g46c/.git" ]'
+rm -rf "$T/wt46"; git -C "$ROOT/g46c" worktree prune
+mk g46w; git -C "$ROOT/g46w" worktree add -q "$T/wt46w" -b wt46w 2>/dev/null; rm -rf "$T/wt46w"
+run archive --move g46w --yes; rc=$?
+check "G46 worktree prunable (ruta muerta) NO bloquea" '[ $rc = 0 ] && [ -d "$ROOT/Archive/g46w/.git" ] && [ ! -e "$ROOT/g46w" ]'
+( cd "$ROOT/g46d" && exec sleep 8 ) & SL=$!; sleep 0.3
+run archive --move g46d --yes; rc=$?
+check "G46 repo en uso por un proceso: DENY, nada se movio" '[ $rc != 0 ] && grep -q "en uso por procesos" "$T/out.txt" && [ -d "$ROOT/g46d/.git" ]'
+kill $SL 2>/dev/null; wait $SL 2>/dev/null
+run archive --move ../g46e --yes; check "G46 nombre con ruta: DENY" '[ $? != 0 ] && grep -q "nombre no valido" "$T/out.txt" && [ -d "$ROOT/g46e/.git" ]'
+run archive --yes g46e; check "G46 --yes sin --move: error de uso" '[ $? = 2 ]'
+run archive --move g46e; check "G46 repo normal listo: WOULD_MOVE (y --move no lo toca)" 'grep -q WOULD_MOVE "$T/out.txt" && [ -d "$ROOT/g46e/.git" ]'
 
 echo "G35 autoridad: el codigo del SUT no invoca comandos prohibidos"
 code=$(grep -vE '^\s*#' "$SUT")
