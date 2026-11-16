@@ -8,6 +8,9 @@ corrida del sincronizador (last.tsv) y de las refs locales.
   git-autosync report            imprime el reporte y lo guarda en el estado
   git-autosync report --notify   ademas avisa por escritorio si el resumen cambio
   git-autosync report --no-audit no consulta el veredicto de salida de repo-engine
+  git-autosync report --local    solo lo que existe unicamente aqui: repo, rama, commits y el comando sugerido
+  git-autosync report --html [ARCHIVO]
+                                 panel HTML de solo lectura (por defecto <estado>/report.html)
 """
 from __future__ import annotations
 
@@ -137,8 +140,10 @@ def scan(row: list[str]) -> dict:
             rc2, n = git(d, "rev-list", "--count", f"refs/heads/{b}", "--not", "--remotes")
             n = int(n.strip() or 0) if rc2 == 0 else 0
             if n:
+                rc3, subj = git(d, "log", "-3", "--format=%h %s", f"refs/heads/{b}", "--not", "--remotes")
                 info["branches"].append({"branch": b, "n": n, "upstream": up, "date": date,
-                                         "gone": "gone" in track, "open": open_in.get(b)})
+                                         "gone": "gone" in track, "open": open_in.get(b),
+                                         "subjects": [x[:100] for x in subj.splitlines()[:3]] if rc3 == 0 else []})
 
     if default and default != "-":
         rc, out = git(d, "log", "-30", "--format=%s", f"refs/remotes/origin/{default}")
@@ -172,6 +177,66 @@ def outgoing_verdict(entry: Path, wt: str) -> str:
         return f"SIN_VEREDICTO ({type(e).__name__})"
 
 
+def suggest(i: dict, b: dict) -> str:
+    """Comando sugerido (texto; este programa NUNCA lo ejecuta) para subir una rama con commits solo locales."""
+    q = "'" + i["dir"].replace("'", "'\\''") + "'"
+    if i["status"] in ("NO_REMOTE", "ARCHIVED"):
+        return ""  # no hay a donde subir / esta archivado a proposito
+    if i["status"] == "REMOTE_MISSING":
+        return ""
+    if i["pr_flow"] and b["branch"] == i["default"]:
+        return f"# integra por PR: crea una rama y abre PR (no pushear {b['branch']} directo): git -C {q} switch -c <rama>"
+    if b["gone"] or not b["upstream"]:
+        return f"git -C {q} push -u origin {b['branch']}"
+    remote, _, rbranch = b["upstream"].partition("/")
+    target = b["branch"] if rbranch == b["branch"] else f"{b['branch']}:{rbranch}"
+    return f"git -C {q} push {remote} {target}"
+
+
+def local_rows(infos: list[dict]) -> list[dict]:
+    """Una fila por rama con commits que no estan en ningun remoto (mas repos sin remoto / archivados)."""
+    rows = []
+    for i in infos:
+        if i["status"] in ("NO_REMOTE", "ARCHIVED", "REMOTE_MISSING") and not i["branches"]:
+            rows.append({"repo": i["name"], "dir": i["dir"], "status": i["status"], "branch": "", "n": 0,
+                         "date": i["last"], "upstream": "", "subjects": [], "command": "",
+                         "kind": "sin_remoto" if i["status"] == "NO_REMOTE" else i["status"].lower(),
+                         "commits": i["commits"]})
+        for b in sorted(i["branches"], key=lambda b: -b["n"]):
+            kind = ("archivado" if i["status"] == "ARCHIVED" else "sin_remoto" if i["status"] == "NO_REMOTE"
+                    else "remoto_caido" if i["status"] == "REMOTE_MISSING"
+                    else "sin_upstream" if (b["gone"] or not b["upstream"]) else "adelantada")
+            rows.append({"repo": i["name"], "dir": i["dir"], "status": i["status"], "branch": b["branch"],
+                         "n": b["n"], "date": b["date"], "upstream": b["upstream"], "gone": b["gone"],
+                         "open": bool(b["open"]), "subjects": b["subjects"], "command": suggest(i, b),
+                         "kind": kind, "commits": i["commits"], "pr_flow": i["pr_flow"]})
+    return rows
+
+
+def local_text(infos: list[dict]) -> str:
+    rows = local_rows(infos)
+    out = [f"git-autosync report --local — {time.strftime('%F %H:%M')}   (solo lectura; los comandos son sugerencias, no se ejecutan)"]
+    live = [r for r in rows if r["kind"] in ("adelantada", "sin_upstream")]
+    uniq = {i["name"]: i["total_unpub"] for i in infos if i["name"] in {r["repo"] for r in live}}
+    out.append(f"\nCommits solo locales: {sum(uniq.values())} (unicos por repo) en {len(live)} rama(s) de {len(uniq)} repo(s)")
+    for r in live:
+        tag = "SIN UPSTREAM" if r["kind"] == "sin_upstream" else f"upstream {r['upstream']}"
+        out.append(f"  {r['repo'][:32]:<32} {r['branch'][:34]:<34} +{r['n']:<4} {r['date']}  {tag}")
+        for sj in r["subjects"]:
+            out.append(f"      · {sj}")
+        if r["command"]:
+            out.append(f"      $ {r['command']}")
+    only = [r for r in rows if r["kind"] in ("sin_remoto", "archivado", "remoto_caido")]
+    out.append(f"\nUnica copia (sin a donde subir): {len({r['repo'] for r in only})} repo(s)")
+    seen = set()
+    for r in only:
+        if r["repo"] in seen:
+            continue
+        seen.add(r["repo"])
+        out.append(f"  {r['repo'][:34]:<34} {r['kind']:<13} {r['commits']:>5} commits  ultimo {r['date'] or '-'}")
+    return "\n".join(out) + "\n"
+
+
 def age(seconds: float) -> str:
     if seconds < 120:
         return f"{int(seconds)} s"
@@ -180,6 +245,30 @@ def age(seconds: float) -> str:
     if seconds < 172800:
         return f"{int(seconds // 3600)} h"
     return f"{int(seconds // 86400)} dias"
+
+
+def panel_template() -> str:
+    here = Path(__file__).resolve().parent
+    for c in (here / "git-autosync-panel.html", here / "panel" / "panel.html"):
+        if c.is_file():
+            return c.read_text(encoding="utf-8")
+    raise SystemExit("no encuentro la plantilla del panel (git-autosync-panel.html)")
+
+
+def html_panel(infos: list[dict], sync_age: float) -> str:
+    """Panel HTML autocontenido y de solo lectura. Los datos van como JSON escapado; el JS los pinta con textContent."""
+    repos = []
+    for i in infos:
+        ws = i["worktrees"]
+        repos.append({"name": i["name"], "status": i["status"], "default": i["default"], "commits": i["commits"],
+                      "last": i["last"], "mod": sum(max(w.get("mod", 0), 0) for w in ws),
+                      "untracked": sum(max(w.get("untracked", 0), 0) for w in ws), "stash": i["stash"],
+                      "unpub": i["total_unpub"], "reason": i["reason"][:160], "pr_flow": i["pr_flow"]})
+    data = {"generated": time.strftime("%F %H:%M"), "sync_age": age(sync_age), "stale": sync_age > 3 * 3600,
+            "repos": repos, "local": local_rows(infos)}
+    blob = json.dumps(data, ensure_ascii=False)
+    blob = blob.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+    return panel_template().replace("__DATA__", blob)
 
 
 def main() -> int:
@@ -196,7 +285,7 @@ def main() -> int:
         infos = sorted(ex.map(scan, rows), key=lambda i: i["name"].lower())
 
     entry = repo_engine_entry()
-    if entry and "--no-audit" not in args:
+    if entry and "--no-audit" not in args and "--local" not in args and "--html" not in args:
         jobs = []
         for i in infos:
             if not i["engine"]:
@@ -207,6 +296,21 @@ def main() -> int:
         with ThreadPoolExecutor(max_workers=4) as ex:
             for i, v in zip(jobs, ex.map(lambda i: outgoing_verdict(entry, i["dir"]), jobs)):
                 i["engine"]["verdict"] = v
+
+    if "--local" in args:
+        sys.stdout.write(local_text(infos))
+        return 0
+    if "--html" in args:
+        av = sys.argv[1:]
+        k = av.index("--html")
+        target = Path(av[k + 1]) if k + 1 < len(av) and not av[k + 1].startswith("--") else STATE / "report.html"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(html_panel(infos, NOW - last.stat().st_mtime), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, target)
+        print(f"panel: {target}")
+        return 0
 
     out: list[str] = []
     p = out.append

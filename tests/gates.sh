@@ -325,6 +325,46 @@ check "G44 archivado: no notifica como bloqueo ni entra en blocked" '! grep -q "
 "$SUT" report --no-audit >"$T/report44.txt" 2>&1
 check "G44 reporte: aparece como unica copia con su commit sin subir" 'grep -qE "^ +g44 .*\+1 commits que nunca se subieron" "$T/report44.txt" && grep -q "UNICA COPIA" "$T/report44.txt"'
 
+echo "G47 report --local: solo lo que existe unicamente aqui, con commits y comando sugerido, sin tocar nada"
+mk g47a; mk g47b; mk g47c
+( cd "$ROOT/g47a" && git checkout -q -b feat-sola && echo 1 >a.txt && git add -A && git commit -qm "primer cambio solo local" && echo 2 >b.txt && git add -A && git commit -qm "segundo cambio solo local" )
+( cd "$ROOT/g47b" && git checkout -q -b con-upstream && git push -q -u origin con-upstream 2>/dev/null && echo 3 >c.txt && git add -A && git commit -qm "adelantada del upstream" )
+( cd "$ROOT/g47b" && git checkout -q -b otra-rama && git branch --set-upstream-to=origin/main otra-rama -q && echo 4 >d.txt && git add -A && git commit -qm "upstream con otro nombre" )
+git -C "$ROOT/g47c" remote remove origin
+run; s47=$(for n in g47a g47b g47c; do snap "$ROOT/$n" 1; done | sha256sum)
+"$SUT" report --local >"$T/local47.txt" 2>&1; rc=$?
+s47b=$(for n in g47a g47b g47c; do snap "$ROOT/$n" 1; done | sha256sum)
+check "G47 --local termina bien y no modifica ningun repo" '[ $rc = 0 ] && [ "$s47" = "$s47b" ]'
+check "G47 lista la rama nunca subida con +2, sus commits y push -u" 'grep -qE "g47a +feat-sola +\+2 .*SIN UPSTREAM" "$T/local47.txt" && grep -q "segundo cambio solo local" "$T/local47.txt" && grep -qE "\\$ git -C .*g47a.* push -u origin feat-sola" "$T/local47.txt"'
+check "G47 rama con upstream adelantada: push sin -u" 'grep -qE "g47b +con-upstream +\+1 .*upstream origin/con-upstream" "$T/local47.txt" && grep -qE "\\$ git -C .*g47b.* push origin con-upstream$" "$T/local47.txt"'
+check "G47 upstream con otro nombre: push <remote> rama:destino" 'grep -qE "\\$ git -C .*g47b.* push origin otra-rama:main$" "$T/local47.txt"'
+check "G47 repo sin remoto aparece como unica copia y sin comando" 'grep -qE "^  g47c +sin_remoto" "$T/local47.txt" && ! grep -q "g47c.* push" "$T/local47.txt"'
+check "G47 un repo al dia no aparece" '! grep -q "g47-nada" "$T/local47.txt" && ! grep -qE "^  g01 " "$T/local47.txt"'
+
+echo "G48 report --html: panel autocontenido, solo lectura, datos escapados"
+mk g48; ( cd "$ROOT/g48" && git checkout -q -b rama-xss && echo 1 >a.txt && git add -A && git commit -qm 'x</script><img src=x onerror=alert(1)> & "q"' && echo 2 >b.txt && git add -A && git commit -qm "segundo" )
+run; s48=$(snap "$ROOT/g48" 1); P48="$T/panel48.html"
+"$SUT" report --html "$P48" >"$T/html48.txt" 2>&1; rc=$?
+check "G48 --html termina bien, escribe el archivo con permisos 600 y no toca ningun repo" '[ $rc = 0 ] && [ -s "$P48" ] && [ "$(stat -c %a "$P48")" = 600 ] && [ "$(snap "$ROOT/g48" 1)" = "$s48" ] && [ ! -e "$P48.tmp" ]'
+check "G48 el mensaje hostil no aparece crudo (no rompe el <script> de datos)" '! grep -q "</script><img" "$P48" && grep -q "u003c/script" "$P48"'
+check "G48 sin recursos externos (ni scripts ni estilos ni fuentes remotas)" '! grep -qE "(src|href)=\"https?://|@import|<link " "$P48"'
+check "G48 los datos son JSON valido y traen la rama, +2 y el mensaje intacto" 'python3 - "$P48" <<PYEOF
+import json,re,sys
+h=open(sys.argv[1],encoding="utf-8").read()
+blob=re.search(r"<script id=\"data\" type=\"application/json\">(.*?)</script>",h,re.S).group(1)
+d=json.loads(blob)
+r=[x for x in d["local"] if x["repo"]=="g48" and x["branch"]=="rama-xss"]
+sys.exit(0 if r and r[0]["n"]==2 and any("onerror=alert(1)" in s for s in r[0]["subjects"]) else 1)
+PYEOF'
+if command -v node >/dev/null 2>&1; then
+  python3 - "$P48" "$T/panel48.js" <<'PYEOF'
+import re,sys
+h=open(sys.argv[1],encoding="utf-8").read()
+open(sys.argv[2],"w").write(re.findall(r"<script>(.*?)</script>",h,re.S)[0])
+PYEOF
+  check "G48 el JS del panel es sintacticamente valido" 'node --check "$T/panel48.js"'
+  check "G48 el JS pinta con textContent y nunca con innerHTML" '! grep -qE "innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(" "$T/panel48.js"'
+fi
 echo "G46 archive --move: manifiesto por defecto, rename atomico con --yes, DENY ante duda"
 for n in g46a g46b g46c g46d g46e; do mk $n; done
 ( cd "$ROOT/g46a" && echo wip >>f.txt && echo nuevo >sin-rastrear.txt && echo solo >local.txt && git add local.txt && git commit -qm solo )
