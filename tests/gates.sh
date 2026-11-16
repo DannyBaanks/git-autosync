@@ -394,6 +394,23 @@ run archive --move ../g46e --yes; check "G46 nombre con ruta: DENY" '[ $? != 0 ]
 run archive --yes g46e; check "G46 --yes sin --move: error de uso" '[ $? = 2 ]'
 run archive --move g46e; check "G46 repo normal listo: WOULD_MOVE (y --move no lo toca)" 'grep -q WOULD_MOVE "$T/out.txt" && [ -d "$ROOT/g46e/.git" ]'
 
+echo "G49 serve: solo 127.0.0.1, solo GET, Host local, sin escrituras"
+mk g49; ( cd "$ROOT/g49" && git checkout -q -b rama-live && echo 1 >a.txt && git add -A && git commit -qm "vivo uno" )
+run; s49=$(snap "$ROOT/g49" 1)
+PORT49=$((20000 + RANDOM % 20000)); REP49="$(dirname "$SUT")/git-autosync-report"
+python3 -B "$REP49" --serve "$PORT49" >"$T/serve49.log" 2>&1 & SRV=$!
+for i in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT49/api/data" 2>/dev/null && break; sleep 0.2; done
+H="Host: 127.0.0.1:$PORT49"
+check "G49 /api/data devuelve JSON con repos y la rama nueva" 'curl -s -H "$H" "http://127.0.0.1:$PORT49/api/data" | python3 -c "import json,sys; d=json.load(sys.stdin); assert any(r[\"repo\"]==\"g49\" and r[\"branch\"]==\"rama-live\" for r in d[\"local\"])"'
+check "G49 la pagina / es el panel con sus botones" 'curl -s -H "$H" "http://127.0.0.1:$PORT49/" | grep -q "id=\"refresh\"" && curl -s -H "$H" "http://127.0.0.1:$PORT49/" | grep -q "id=\"copyrep\"" '
+check "G49 /api/report devuelve el reporte completo" 'curl -s -H "$H" "http://127.0.0.1:$PORT49/api/report" | grep -q "git-autosync report"'
+check "G49 un Host ajeno (rebinding) recibe 403" '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example:$PORT49" "http://127.0.0.1:$PORT49/api/data")" = 403 ]'
+check "G49 escrituras (POST/PUT/DELETE) reciben 405" '[ "$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "$H" "http://127.0.0.1:$PORT49/api/data")" = 405 ] && [ "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE -H "$H" "http://127.0.0.1:$PORT49/")" = 405 ]'
+check "G49 ruta desconocida: 404" '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "$H" "http://127.0.0.1:$PORT49/nada")" = 404 ]'
+check "G49 el servidor no toca ningun repo (huella igual tras las peticiones)" '[ "$(snap "$ROOT/g49" 1)" = "$s49" ]'
+check "G49 escucha solo en 127.0.0.1 (ni 0.0.0.0 ni ::)" '! grep -qE "\"0\.0\.0\.0\"|\"::\"" "$REP49" && grep -q "(\"127.0.0.1\", port)" "$REP49"'
+kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
+
 echo "G35 autoridad: el codigo del SUT no invoca comandos prohibidos"
 code=$(grep -vE '^\s*#' "$SUT")
 check "G35 sin reset/clean/stash/rebase/push/checkout/switch/pull/--force/prune activo" \

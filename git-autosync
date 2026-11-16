@@ -38,7 +38,7 @@
 #               sin este archivo se deduce del historial de origin
 #   repo-engine ruta a repo-engine.py (por defecto ~/Development/ISyCo/tools/repo-engine/repo-engine.py)
 set -u
-VERSION=2.3.0
+VERSION=2.4.0
 SELF=$(readlink -f "$0")
 
 export LC_ALL=C
@@ -479,6 +479,7 @@ case "${1:-}" in
     exit 0 ;;
   --version) echo "git-autosync $VERSION"; exit 0 ;;
   report) exec python3 -B "$(dirname "$SELF")/git-autosync-report" "${@:2}" ;;
+  serve) exec python3 -B "$(dirname "$SELF")/git-autosync-report" --serve "${@:2}" ;;
   archive)
     shift; move=0; yes=0; names=()
     for a in "$@"; do

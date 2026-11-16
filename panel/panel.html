@@ -79,6 +79,7 @@ td.nw{white-space:nowrap}
 td.det{color:var(--muted);font-size:13px;max-width:360px}
 .empty{color:var(--muted);padding:18px;background:var(--surface);border:1px dashed var(--line);border-radius:10px;text-align:center}
 .sec{font-size:13px;color:var(--muted);margin:14px 0 6px;font-weight:600}
+#status{align-self:center;max-width:100%}
 footer{margin-top:24px;color:var(--muted);font-size:12px}
 @media (max-width:640px){
   .wrap{padding:0 12px}
@@ -103,7 +104,10 @@ footer{margin-top:24px;color:var(--muted);font-size:12px}
   <div class="tools">
     <input type="search" id="q" placeholder="Buscar… (tecla /)" aria-label="Buscar en esta vista">
     <button class="b" id="toggle" type="button">Expandir todo</button>
+    <button class="b" id="refresh" type="button" title="Vuelve a leer los datos del sincronizador">Actualizar</button>
+    <button class="b" id="copyrep" type="button" title="Copia el reporte completo para pegarlo en el chat">Copiar reporte</button>
     <button class="b" id="theme" type="button" aria-label="Cambiar tema">Tema</button>
+    <span class="sub" id="status" aria-live="polite"></span>
   </div>
  </div>
 </div>
@@ -123,15 +127,20 @@ footer{margin-top:24px;color:var(--muted);font-size:12px}
 <script>
 (function(){
 "use strict";
+var LIVE = location.protocol.indexOf("http") === 0;   /* servido por git-autosync serve: se puede actualizar */
 var D = JSON.parse(document.getElementById("data").textContent);
 var VIEWS = ["local","only","dirty","all"];
 var state = {view:"local", q:"", chip:"problemas", sort:{k:"prio",dir:1}};
+
+/* derivados de D: se recalculan en cada actualizacion */
+var live=[], only=[], dirty=[], unpubOf={}, nCommits=0, nLiveRepos=0;
 
 function el(tag, cls, text){var e=document.createElement(tag); if(cls)e.className=cls; if(text!==undefined)e.textContent=text; return e;}
 function clear(n){while(n.firstChild)n.removeChild(n.firstChild);}
 function badge(text,cls){return el("span","badge "+(cls||""),text);}
 function safeGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
 function safeSet(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+function stamp(msg){document.getElementById("status").textContent=msg;}
 
 /* ---------- tema ---------- */
 var th=safeGet("gas-theme"); if(th) document.documentElement.setAttribute("data-theme",th);
@@ -141,31 +150,33 @@ document.getElementById("theme").addEventListener("click",function(){
   var next = dark ? "light":"dark"; document.documentElement.setAttribute("data-theme",next); safeSet("gas-theme",next);
 });
 
-/* ---------- datos derivados ---------- */
-var meta=document.getElementById("meta");
-meta.appendChild(document.createTextNode("Generado "+D.generated+" · sincronizado hace "+D.sync_age+" · "+D.repos.length+" repos "));
-if(D.stale) meta.appendChild(el("span","stale","⚠ atrasado"));
-
-var live = D.local.filter(function(r){return r.kind==="adelantada"||r.kind==="sin_upstream";});
-var unpubOf = {}; D.repos.forEach(function(r){unpubOf[r.name]=r.unpub;});
-var liveRepos = {}; live.forEach(function(r){liveRepos[r.repo]=1;});
-var nCommits = Object.keys(liveRepos).reduce(function(a,n){return a+(unpubOf[n]||0);},0);
-var seen = {}; var only = D.local.filter(function(r){
-  if(["sin_remoto","archivado","remoto_caido"].indexOf(r.kind)<0) return false;
-  if(seen[r.repo]) return false; seen[r.repo]=1; return true;});
-var dirty = D.repos.filter(function(r){return r.mod>0;});
+/* ---------- derivar vistas desde D ---------- */
 var PRIO = {REMOTE_MISSING:0,AUTH_ERROR:0,INTERRUPTED:1,DIVERGED:1,BUSY:2,DIRTY:2,AHEAD:3,NO_LOCAL:4,NO_REMOTE:4,UNKNOWN:4,NETWORK_ERROR:5,PINNED:6,ARCHIVED:7,UP_TO_DATE:8,UPDATED:8};
 function prio(s){return PRIO[s]===undefined?9:PRIO[s];}
-var PROBLEM = {REMOTE_MISSING:1,AUTH_ERROR:1,INTERRUPTED:1,DIVERGED:1,BUSY:1,DIRTY:1,AHEAD:1,UNKNOWN:1,NETWORK_ERROR:1};
 var STATUS_CLS={UPDATED:"ok",UP_TO_DATE:"ok",AHEAD:"warn",DIVERGED:"info",DIRTY:"warn",BUSY:"warn",NO_REMOTE:"none",REMOTE_MISSING:"bad",ARCHIVED:"",PINNED:"none",NO_LOCAL:"none",INTERRUPTED:"bad",AUTH_ERROR:"bad",NETWORK_ERROR:"warn",UNKNOWN:"warn"};
 
-/* ---------- pestanas y contadores ---------- */
-var COUNTS = {local:nCommits+" commits", only:only.length, dirty:dirty.length, all:D.repos.length};
-document.getElementById("c-local").textContent = Object.keys(liveRepos).length;
-document.getElementById("c-only").textContent = only.length;
-document.getElementById("c-dirty").textContent = dirty.length;
-document.getElementById("c-all").textContent = D.repos.length;
+function derive(){
+  live = D.local.filter(function(r){return r.kind==="adelantada"||r.kind==="sin_upstream";});
+  unpubOf = {}; D.repos.forEach(function(r){unpubOf[r.name]=r.unpub;});
+  var liveRepos = {}; live.forEach(function(r){liveRepos[r.repo]=1;});
+  nLiveRepos = Object.keys(liveRepos).length;
+  nCommits = Object.keys(liveRepos).reduce(function(a,n){return a+(unpubOf[n]||0);},0);
+  var seen = {}; only = D.local.filter(function(r){
+    if(["sin_remoto","archivado","remoto_caido"].indexOf(r.kind)<0) return false;
+    if(seen[r.repo]) return false; seen[r.repo]=1; return true;});
+  dirty = D.repos.filter(function(r){return r.mod>0;});
 
+  document.getElementById("c-local").textContent = nLiveRepos;
+  document.getElementById("c-only").textContent = only.length;
+  document.getElementById("c-dirty").textContent = dirty.length;
+  document.getElementById("c-all").textContent = D.repos.length;
+
+  var meta=document.getElementById("meta"); clear(meta);
+  meta.appendChild(document.createTextNode("Generado "+D.generated+" · sincronizado hace "+D.sync_age+" · "+D.repos.length+" repos "));
+  if(D.stale) meta.appendChild(el("span","stale","⚠ atrasado"));
+}
+
+/* ---------- pestanas ---------- */
 function setView(v, push){
   if(VIEWS.indexOf(v)<0) v="local";
   state.view=v;
@@ -202,21 +213,60 @@ function matches(parts){
   return parts.join(" ").toLowerCase().indexOf(state.q)>=0;
 }
 
-/* ---------- boton expandir/contraer (vista local) ---------- */
+/* ---------- expandir/contraer ---------- */
 document.getElementById("toggle").addEventListener("click",function(){
   var ds=document.querySelectorAll("#v-local details"); if(!ds.length) return;
   var open=!ds[0].open; ds.forEach(function(d){d.open=open;});
   this.textContent=open?"Contraer todo":"Expandir todo";
 });
 
+/* ---------- actualizar y copiar reporte (solo con git-autosync serve) ---------- */
+function fetchText(url){
+  return fetch(url,{cache:"no-store"}).then(function(r){
+    if(!r.ok) return r.text().then(function(t){throw new Error("HTTP "+r.status+" "+t.slice(0,120));});
+    return r;
+  });
+}
+function refresh(){
+  if(!LIVE){ stamp("Abre el panel con git-autosync serve para actualizar."); return; }
+  var b=document.getElementById("refresh"); b.disabled=true; stamp("Actualizando…");
+  fetchText("/api/data").then(function(r){return r.json();}).then(function(nd){
+    D=nd; derive(); render();
+    stamp("Actualizado "+new Date().toLocaleTimeString());
+  }).catch(function(e){ stamp("No se pudo actualizar: "+e.message); })
+    .then(function(){ b.disabled=false; });
+}
+function fallbackCopy(t){
+  var ta=document.createElement("textarea"); ta.value=t; document.body.appendChild(ta); ta.select();
+  var ok=false; try{ok=document.execCommand("copy");}catch(e){} document.body.removeChild(ta); return ok;
+}
+function copyText(t){
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    return navigator.clipboard.writeText(t).then(function(){return true;}, function(){return fallbackCopy(t);});
+  }
+  return Promise.resolve(fallbackCopy(t));
+}
+function copyReport(){
+  if(!LIVE){ stamp("Abre el panel con git-autosync serve para copiar el reporte."); return; }
+  var b=document.getElementById("copyrep"); b.disabled=true; b.textContent="Generando…"; stamp("Generando reporte…");
+  fetchText("/api/report").then(function(r){return r.text();}).then(copyText).then(function(ok){
+    stamp(ok ? "Reporte copiado: pégalo en el chat." : "No pude copiar: selecciona el texto manualmente.");
+  }).catch(function(e){ stamp("No se pudo generar el reporte: "+e.message); })
+    .then(function(){ b.disabled=false; b.textContent="Copiar reporte"; });
+}
+var rb=document.getElementById("refresh"), cb=document.getElementById("copyrep");
+rb.addEventListener("click",refresh);
+cb.addEventListener("click",copyReport);
+if(!LIVE){
+  rb.disabled=true; rb.title="Disponible con git-autosync serve";
+  stamp("Vista estática. Con git-autosync serve puedes actualizar y copiar el reporte.");
+}
+
 /* ---------- utilidades de tabla ---------- */
 function copyBtn(text){
   var b=el("button",null,"Copiar"); b.type="button";
   b.addEventListener("click",function(){
-    function done(ok){b.textContent=ok?"Copiado ✓":"Selecciona y copia"; setTimeout(function(){b.textContent="Copiar";},1500);}
-    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(function(){done(true);},function(){done(false);});}
-    else{var t=document.createElement("textarea"); t.value=text; document.body.appendChild(t); t.select();
-      var ok=false; try{ok=document.execCommand("copy");}catch(e){} document.body.removeChild(t); done(ok);}
+    copyText(text).then(function(ok){ b.textContent=ok?"Copiado ✓":"Selecciona y copia"; setTimeout(function(){b.textContent="Copiar";},1500); });
   });
   return b;
 }
@@ -240,7 +290,7 @@ function table(cols, rows, sortState, onSort){
 }
 function empty(box, text){ box.appendChild(el("div","empty",text)); }
 
-/* ---------- vista 1: commits solo locales ---------- */
+/* ---------- vista 1: commits sin subir ---------- */
 function renderLocal(){
   var box=document.getElementById("v-local"); clear(box);
   var byRepo={}; live.forEach(function(r){
@@ -279,7 +329,7 @@ function renderLocal(){
 function renderOnly(){
   var box=document.getElementById("v-only"); clear(box);
   var rows=only.filter(function(r){return matches([r.repo,r.kind]);});
-  box.appendChild(el("p","hint","Repos sin un lugar donde subirlos. Si el remoto se borró a propósito, márcalo con git-autosync archive.")); 
+  box.appendChild(el("p","hint","Repos sin un lugar donde subirlos. Si el remoto se borró a propósito, márcalo con git-autosync archive."));
   if(!rows.length){ empty(box, only.length?"Nada con este filtro.":"Ningún repo es única copia."); return; }
   var tw=el("div","tw");
   tw.appendChild(table([
@@ -305,7 +355,7 @@ function renderDirty(){
   box.appendChild(tw);
 }
 
-/* ---------- vista 4: todos los repos, con filtro por estado y orden ---------- */
+/* ---------- vista 4: todos los repos ---------- */
 var CHIPS=[
   {k:"problemas",l:"Divergentes o adelantadas",f:function(r){return r.status==="DIVERGED"||r.status==="AHEAD";}},
   {k:"todos",l:"Todos",f:function(){return true;}},
@@ -330,8 +380,8 @@ function renderAll(){
   var fdef=CHIPS.filter(function(c){return c.k===state.chip;})[0]||CHIPS[0];
   var rows=D.repos.filter(function(r){return fdef.f(r) && matches([r.name,r.status,r.reason,r.default]);});
   rows.sort(function(a,b){
-    var s=state.sort, va, vb;
-    if(s.k==="prio"){va=prio(a.status); vb=prio(b.status); return (va-vb) || a.name.localeCompare(b.name);}
+    var s=state.sort;
+    if(s.k==="prio"){var d=prio(a.status)-prio(b.status); return d || a.name.localeCompare(b.name);}
     if(s.k==="name"){return s.dir*a.name.localeCompare(b.name);}
     if(s.k==="unpub"){return s.dir*((a.unpub||0)-(b.unpub||0));}
     if(s.k==="last"){return s.dir*String(a.last||"").localeCompare(String(b.last||""));}
@@ -358,7 +408,8 @@ function render(){
   else renderAll();
 }
 
-/* arranque: pestana desde la URL (#local, #only, #dirty, #all) */
+/* arranque */
+derive();
 setView(location.hash.slice(1), false);
 })();
 </script>
