@@ -217,7 +217,8 @@ def local_text(infos: list[dict]) -> str:
     rows = local_rows(infos)
     out = [f"git-autosync report --local — {time.strftime('%F %H:%M')}   (solo lectura; los comandos son sugerencias, no se ejecutan)"]
     live = [r for r in rows if r["kind"] in ("adelantada", "sin_upstream")]
-    out.append(f"\nCommits solo locales: {sum(r['n'] for r in live)} en {len(live)} rama(s) de {len({r['repo'] for r in live})} repo(s)")
+    uniq = {i["name"]: i["total_unpub"] for i in infos if i["name"] in {r["repo"] for r in live}}
+    out.append(f"\nCommits solo locales: {sum(uniq.values())} (unicos por repo) en {len(live)} rama(s) de {len(uniq)} repo(s)")
     for r in live:
         tag = "SIN UPSTREAM" if r["kind"] == "sin_upstream" else f"upstream {r['upstream']}"
         out.append(f"  {r['repo'][:32]:<32} {r['branch'][:34]:<34} +{r['n']:<4} {r['date']}  {tag}")
@@ -246,6 +247,30 @@ def age(seconds: float) -> str:
     return f"{int(seconds // 86400)} dias"
 
 
+def panel_template() -> str:
+    here = Path(__file__).resolve().parent
+    for c in (here / "git-autosync-panel.html", here / "panel" / "panel.html"):
+        if c.is_file():
+            return c.read_text(encoding="utf-8")
+    raise SystemExit("no encuentro la plantilla del panel (git-autosync-panel.html)")
+
+
+def html_panel(infos: list[dict], sync_age: float) -> str:
+    """Panel HTML autocontenido y de solo lectura. Los datos van como JSON escapado; el JS los pinta con textContent."""
+    repos = []
+    for i in infos:
+        ws = i["worktrees"]
+        repos.append({"name": i["name"], "status": i["status"], "default": i["default"], "commits": i["commits"],
+                      "last": i["last"], "mod": sum(max(w.get("mod", 0), 0) for w in ws),
+                      "untracked": sum(max(w.get("untracked", 0), 0) for w in ws), "stash": i["stash"],
+                      "unpub": i["total_unpub"], "reason": i["reason"][:160], "pr_flow": i["pr_flow"]})
+    data = {"generated": time.strftime("%F %H:%M"), "sync_age": age(sync_age), "stale": sync_age > 3 * 3600,
+            "repos": repos, "local": local_rows(infos)}
+    blob = json.dumps(data, ensure_ascii=False)
+    blob = blob.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+    return panel_template().replace("__DATA__", blob)
+
+
 def main() -> int:
     args = set(sys.argv[1:])
     if args & {"-h", "--help"}:
@@ -260,7 +285,7 @@ def main() -> int:
         infos = sorted(ex.map(scan, rows), key=lambda i: i["name"].lower())
 
     entry = repo_engine_entry()
-    if entry and "--no-audit" not in args and "--local" not in args:
+    if entry and "--no-audit" not in args and "--local" not in args and "--html" not in args:
         jobs = []
         for i in infos:
             if not i["engine"]:
@@ -274,6 +299,17 @@ def main() -> int:
 
     if "--local" in args:
         sys.stdout.write(local_text(infos))
+        return 0
+    if "--html" in args:
+        av = sys.argv[1:]
+        k = av.index("--html")
+        target = Path(av[k + 1]) if k + 1 < len(av) and not av[k + 1].startswith("--") else STATE / "report.html"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(html_panel(infos, NOW - last.stat().st_mtime), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, target)
+        print(f"panel: {target}")
         return 0
 
     out: list[str] = []

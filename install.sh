@@ -13,6 +13,7 @@ if [ "${1:-}" != "--no-gates" ]; then
 fi
 mkdir -p "$HOME/.local/bin" "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 install -m 755 "$here/git-autosync" "$here/git-autosync-report" "$HOME/.local/bin/"
+install -m 644 "$here/panel/panel.html" "$HOME/.local/bin/git-autosync-panel.html"
 install -m 644 "$here"/systemd/*.service "$here"/systemd/*.timer "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/"
 systemctl --user daemon-reload
 systemctl --user enable --now git-autosync.timer git-autosync-report.timer
