@@ -8,34 +8,44 @@
 <style>
 :root{
   --bg:#f6f7f9; --surface:#fff; --text:#17191c; --muted:#5b6470; --line:#dfe3e8;
-  --accent:#2457d6; --warn:#a15c00; --warn-bg:#fff1d6; --bad:#b4232a; --bad-bg:#fde4e5;
-  --ok:#1b7a3d; --ok-bg:#dff3e5; --info-bg:#e6edfc; --code-bg:#eef0f3; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --accent:#2457d6; --accent-bg:#e6edfc; --warn:#a15c00; --warn-bg:#fff1d6; --bad:#b4232a; --bad-bg:#fde4e5;
+  --ok:#1b7a3d; --ok-bg:#dff3e5; --code-bg:#eef0f3; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
   --bg:#0f1114; --surface:#171a1f; --text:#e8eaed; --muted:#9aa4b2; --line:#2a2f37;
-  --accent:#7aa2ff; --warn:#f0b35a; --warn-bg:#3a2b10; --bad:#ff8087; --bad-bg:#40181b;
-  --ok:#6fd392; --ok-bg:#15301f; --info-bg:#1b2742; --code-bg:#20242b;}}
+  --accent:#7aa2ff; --accent-bg:#1b2742; --warn:#f0b35a; --warn-bg:#3a2b10; --bad:#ff8087; --bad-bg:#40181b;
+  --ok:#6fd392; --ok-bg:#15301f; --code-bg:#20242b;}}
 :root[data-theme="dark"]{
   --bg:#0f1114; --surface:#171a1f; --text:#e8eaed; --muted:#9aa4b2; --line:#2a2f37;
-  --accent:#7aa2ff; --warn:#f0b35a; --warn-bg:#3a2b10; --bad:#ff8087; --bad-bg:#40181b;
-  --ok:#6fd392; --ok-bg:#15301f; --info-bg:#1b2742; --code-bg:#20242b;}
+  --accent:#7aa2ff; --accent-bg:#1b2742; --warn:#f0b35a; --warn-bg:#3a2b10; --bad:#ff8087; --bad-bg:#40181b;
+  --ok:#6fd392; --ok-bg:#15301f; --code-bg:#20242b;}
 *{box-sizing:border-box}
+html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{max-width:1100px;margin:0 auto;padding:20px 16px 64px}
-header{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:baseline;justify-content:space-between;margin-bottom:16px}
-h1{font-size:22px;margin:0}
+a{color:var(--accent)}
+.wrap{max-width:1100px;margin:0 auto;padding:0 16px}
+/* cabecera fija: titulo, pestanas y busqueda siempre a la vista */
+.top{position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--line);padding-top:12px}
+.row1{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;justify-content:space-between}
+h1{font-size:20px;margin:0}
 .sub{color:var(--muted);font-size:13px}
-.sub .stale{color:var(--bad);font-weight:600}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:12px 0 18px}
-.card{display:flex;flex-direction:column;justify-content:flex-start;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;text-align:left;font:inherit;color:inherit;cursor:pointer}
-.card:hover,.card:focus-visible{border-color:var(--accent);outline:none}
-.card[aria-pressed="true"]{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent) inset}
-.card .n{font-size:28px;font-weight:700;line-height:1.1;display:block}
-.card .l{color:var(--muted);font-size:13px}
-.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0 14px}
-input[type=search]{flex:1 1 220px;min-width:0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font:inherit}
-button.t{padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font:inherit;cursor:pointer}
-h2{font-size:16px;margin:26px 0 8px}
+.stale{color:var(--bad);font-weight:600}
+.tabs{display:flex;gap:4px;overflow-x:auto;margin-top:10px;scrollbar-width:thin}
+.tab{flex:none;appearance:none;border:0;background:none;color:var(--muted);font:inherit;font-weight:600;padding:8px 12px;border-bottom:2px solid transparent;cursor:pointer;white-space:nowrap}
+.tab:hover{color:var(--text)}
+.tab[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+.tab .c{display:inline-block;min-width:22px;padding:0 6px;margin-left:4px;border-radius:999px;background:var(--code-bg);color:var(--text);font-size:12px;text-align:center}
+.tab[aria-selected="true"] .c{background:var(--accent-bg);color:var(--accent)}
+.tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 0}
+input[type=search]{flex:1 1 240px;min-width:0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font:inherit}
+input[type=search]:focus{outline:2px solid var(--accent);outline-offset:-1px}
+button.b{padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font:inherit;cursor:pointer;white-space:nowrap}
+button.b:hover{border-color:var(--accent)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;padding-bottom:10px}
+.chip{appearance:none;border:1px solid var(--line);background:var(--surface);color:var(--text);font:inherit;font-size:13px;border-radius:999px;padding:3px 11px;cursor:pointer}
+.chip[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-bg);color:var(--accent);font-weight:600}
+.view{padding:6px 0 40px}
+.hint{color:var(--muted);font-size:13px;margin:4px 0 10px}
 .repo{background:var(--surface);border:1px solid var(--line);border-radius:10px;margin:8px 0}
 .repo>summary{cursor:pointer;padding:10px 14px;display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;list-style:none}
 .repo>summary::-webkit-details-marker{display:none}
@@ -45,58 +55,84 @@ h2{font-size:16px;margin:26px 0 8px}
 .branch{border-top:1px solid var(--line);padding:10px 14px}
 .brow{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
 .bname{font-family:var(--mono);font-size:13px}
-.badge{display:inline-block;border-radius:999px;padding:1px 9px;font-size:12px;font-weight:600;background:var(--info-bg);color:var(--accent)}
+.badge{display:inline-block;border-radius:999px;padding:1px 9px;font-size:12px;font-weight:600;white-space:nowrap;background:var(--accent-bg);color:var(--accent)}
 .badge.warn{background:var(--warn-bg);color:var(--warn)}
 .badge.bad{background:var(--bad-bg);color:var(--bad)}
 .badge.ok{background:var(--ok-bg);color:var(--ok)}
+.badge.none{background:var(--code-bg);color:var(--muted)}
 .muted{color:var(--muted);font-size:13px}
 ul.subj{margin:6px 0 6px 18px;padding:0;font-size:13px}
 ul.subj li{margin:1px 0}
 .cmd{display:flex;gap:8px;align-items:stretch;margin-top:6px}
 .cmd code{flex:1;min-width:0;overflow-x:auto;white-space:nowrap;background:var(--code-bg);border-radius:6px;padding:6px 10px;font:12.5px var(--mono)}
 .cmd button{flex:none;padding:4px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--text);font:inherit;cursor:pointer}
-table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:14px}
-th,td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--line)}
-th{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;background:var(--bg)}
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;background:var(--bg);position:sticky;top:0}
+th button{all:unset;cursor:pointer}
+th button:hover{color:var(--text)}
 td.num{text-align:right;font-variant-numeric:tabular-nums}
-.tw{overflow-x:auto}
-.empty{color:var(--muted);padding:14px;background:var(--surface);border:1px dashed var(--line);border-radius:10px}
-footer{margin-top:28px;color:var(--muted);font-size:12px}
+td.nw{white-space:nowrap}
+td.det{color:var(--muted);font-size:13px;max-width:360px}
+.empty{color:var(--muted);padding:18px;background:var(--surface);border:1px dashed var(--line);border-radius:10px;text-align:center}
+.sec{font-size:13px;color:var(--muted);margin:14px 0 6px;font-weight:600}
+footer{margin-top:24px;color:var(--muted);font-size:12px}
+@media (max-width:640px){
+  .wrap{padding:0 12px}
+  td.det{display:none} th.det{display:none}
+  .cmd code{font-size:11.5px}
+}
 </style>
 </head>
 <body>
-<main>
-<header>
-  <h1>git-autosync <span class="muted">· qué vive solo en este equipo</span></h1>
-  <div class="sub" id="meta"></div>
-</header>
-<div class="cards" id="cards" role="group" aria-label="Filtros rápidos"></div>
-<div class="bar">
-  <input type="search" id="q" placeholder="Filtrar por repo, rama o mensaje…" aria-label="Filtrar">
-  <button class="t" id="expand" type="button">Expandir todo</button>
-  <button class="t" id="theme" type="button" aria-label="Cambiar tema">Tema</button>
+<div class="top">
+ <div class="wrap">
+  <div class="row1">
+    <h1>git-autosync <span class="muted" style="font-weight:400">· qué vive solo aquí</span></h1>
+    <div class="sub" id="meta"></div>
+  </div>
+  <div class="tabs" role="tablist" aria-label="Vistas">
+    <button class="tab" role="tab" id="t-local" data-v="local" aria-controls="v-local">Solo local <span class="c" id="c-local"></span></button>
+    <button class="tab" role="tab" id="t-only" data-v="only" aria-controls="v-only">Única copia <span class="c" id="c-only"></span></button>
+    <button class="tab" role="tab" id="t-dirty" data-v="dirty" aria-controls="v-dirty">Sin commitear <span class="c" id="c-dirty"></span></button>
+    <button class="tab" role="tab" id="t-all" data-v="all" aria-controls="v-all">Todos los repos <span class="c" id="c-all"></span></button>
+  </div>
+  <div class="tools">
+    <input type="search" id="q" placeholder="Buscar… (tecla /)" aria-label="Buscar en esta vista">
+    <button class="b" id="toggle" type="button">Expandir todo</button>
+    <button class="b" id="theme" type="button" aria-label="Cambiar tema">Tema</button>
+  </div>
+ </div>
 </div>
-<h2 id="h-local">Commits que solo existen aquí</h2>
-<div id="local"></div>
-<h2 id="h-only">Única copia (sin a dónde subir)</h2>
-<div class="tw" id="only"></div>
-<h2 id="h-dirty">Cambios sin commitear</h2>
-<div class="tw" id="dirty"></div>
-<h2 id="h-all">Todos los repos</h2>
-<div class="tw" id="all"></div>
-<footer>Panel de solo lectura generado por <code>git-autosync report --html</code>. Los comandos son sugerencias: este panel no ejecuta nada. Datos de la última sincronización, sin consultar la red.</footer>
-</main>
+
+<div class="wrap">
+  <section class="view" id="v-local" role="tabpanel" aria-labelledby="t-local"></section>
+  <section class="view" id="v-only" role="tabpanel" aria-labelledby="t-only" hidden></section>
+  <section class="view" id="v-dirty" role="tabpanel" aria-labelledby="t-dirty" hidden></section>
+  <section class="view" id="v-all" role="tabpanel" aria-labelledby="t-all" hidden>
+    <div class="chips" id="chips" role="group" aria-label="Filtrar por estado"></div>
+    <div class="tw" id="all"></div>
+  </section>
+  <footer>Panel de solo lectura generado por <code>git-autosync report --html</code>. Los comandos son sugerencias: este panel no ejecuta nada. Datos de la última sincronización, sin consultar la red.</footer>
+</div>
+
 <script id="data" type="application/json">__DATA__</script>
 <script>
 (function(){
 "use strict";
 var D = JSON.parse(document.getElementById("data").textContent);
-var state = {kind:null, q:""};
+var VIEWS = ["local","only","dirty","all"];
+var state = {view:"local", q:"", chip:"problemas", sort:{k:"prio",dir:1}};
+
 function el(tag, cls, text){var e=document.createElement(tag); if(cls)e.className=cls; if(text!==undefined)e.textContent=text; return e;}
 function clear(n){while(n.firstChild)n.removeChild(n.firstChild);}
+function badge(text,cls){return el("span","badge "+(cls||""),text);}
 function safeGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
 function safeSet(k,v){try{localStorage.setItem(k,v);}catch(e){}}
 
+/* ---------- tema ---------- */
 var th=safeGet("gas-theme"); if(th) document.documentElement.setAttribute("data-theme",th);
 document.getElementById("theme").addEventListener("click",function(){
   var cur=document.documentElement.getAttribute("data-theme");
@@ -104,88 +140,124 @@ document.getElementById("theme").addEventListener("click",function(){
   var next = dark ? "light":"dark"; document.documentElement.setAttribute("data-theme",next); safeSet("gas-theme",next);
 });
 
+/* ---------- datos derivados ---------- */
 var meta=document.getElementById("meta");
-meta.appendChild(document.createTextNode("Generado "+D.generated+" · última sincronización hace "+D.sync_age+" · "+D.repos.length+" repos "));
-if(D.stale){meta.appendChild(el("span","stale","⚠ sincronización atrasada"));}
+meta.appendChild(document.createTextNode("Generado "+D.generated+" · sincronizado hace "+D.sync_age+" · "+D.repos.length+" repos "));
+if(D.stale) meta.appendChild(el("span","stale","⚠ atrasado"));
 
 var live = D.local.filter(function(r){return r.kind==="adelantada"||r.kind==="sin_upstream";});
-var seenOnly = {}; var only = D.local.filter(function(r){
-  if(["sin_remoto","archivado","remoto_caido"].indexOf(r.kind)<0) return false;
-  if(seenOnly[r.repo]) return false; seenOnly[r.repo]=1; return true;});
-var dirty = D.repos.filter(function(r){return r.mod>0;});
-var soiled = D.repos.filter(function(r){return r.status==="AHEAD"||r.status==="DIVERGED";});
-var blocked = D.repos.filter(function(r){return ["DIRTY","BUSY","INTERRUPTED","DIVERGED"].indexOf(r.status)>=0;});
 var unpubOf = {}; D.repos.forEach(function(r){unpubOf[r.name]=r.unpub;});
-var nRepos = {}; live.forEach(function(r){nRepos[r.repo]=1;});
-var nCommits = Object.keys(nRepos).reduce(function(a,n){return a+(unpubOf[n]||0);},0);
+var liveRepos = {}; live.forEach(function(r){liveRepos[r.repo]=1;});
+var nCommits = Object.keys(liveRepos).reduce(function(a,n){return a+(unpubOf[n]||0);},0);
+var seen = {}; var only = D.local.filter(function(r){
+  if(["sin_remoto","archivado","remoto_caido"].indexOf(r.kind)<0) return false;
+  if(seen[r.repo]) return false; seen[r.repo]=1; return true;});
+var dirty = D.repos.filter(function(r){return r.mod>0;});
+var PRIO = {REMOTE_MISSING:0,AUTH_ERROR:0,INTERRUPTED:1,DIVERGED:1,BUSY:2,DIRTY:2,AHEAD:3,NO_LOCAL:4,NO_REMOTE:4,UNKNOWN:4,NETWORK_ERROR:5,PINNED:6,ARCHIVED:7,UP_TO_DATE:8,UPDATED:8};
+function prio(s){return PRIO[s]===undefined?9:PRIO[s];}
+var PROBLEM = {REMOTE_MISSING:1,AUTH_ERROR:1,INTERRUPTED:1,DIVERGED:1,BUSY:1,DIRTY:1,AHEAD:1,UNKNOWN:1,NETWORK_ERROR:1};
+var STATUS_CLS={UPDATED:"ok",UP_TO_DATE:"ok",AHEAD:"warn",DIVERGED:"bad",DIRTY:"warn",BUSY:"warn",NO_REMOTE:"none",REMOTE_MISSING:"bad",ARCHIVED:"",PINNED:"none",NO_LOCAL:"none",INTERRUPTED:"bad",AUTH_ERROR:"bad",NETWORK_ERROR:"warn",UNKNOWN:"warn"};
 
-var cardDefs = [
-  {k:"local", n:nCommits, l:"commits únicos solo locales en "+Object.keys(nRepos).length+" repos"},
-  {k:"only",  n:only.length, l:"repos con única copia"},
-  {k:"dirty", n:dirty.length, l:"repos con cambios sin commitear"},
-  {k:"soiled",n:soiled.length, l:"con la rama principal adelantada/divergida"},
-  {k:"blocked",n:blocked.length, l:"repos que no pueden avanzar"}
-];
-var cards=document.getElementById("cards");
-cardDefs.forEach(function(c){
-  var b=el("button","card"); b.type="button"; b.setAttribute("aria-pressed","false"); b.dataset.k=c.k;
-  b.appendChild(el("span","n",String(c.n))); b.appendChild(el("span","l",c.l));
-  b.addEventListener("click",function(){state.kind = state.kind===c.k?null:c.k; render();});
-  cards.appendChild(b);
+/* ---------- pestanas y contadores ---------- */
+var COUNTS = {local:nCommits+" commits", only:only.length, dirty:dirty.length, all:D.repos.length};
+document.getElementById("c-local").textContent = Object.keys(liveRepos).length;
+document.getElementById("c-only").textContent = only.length;
+document.getElementById("c-dirty").textContent = dirty.length;
+document.getElementById("c-all").textContent = D.repos.length;
+
+function setView(v, push){
+  if(VIEWS.indexOf(v)<0) v="local";
+  state.view=v;
+  VIEWS.forEach(function(x){
+    var on = x===v;
+    var t=document.getElementById("t-"+x);
+    t.setAttribute("aria-selected", on?"true":"false");
+    t.tabIndex = on?0:-1;
+    document.getElementById("v-"+x).hidden = !on;
+  });
+  document.getElementById("q").placeholder = "Buscar en "+document.getElementById("t-"+v).firstChild.textContent.trim().toLowerCase()+"… (tecla /)";
+  if(push && location.hash!=="#"+v) history.replaceState(null,"","#"+v);
+  render();
+}
+document.querySelectorAll(".tab").forEach(function(t){
+  t.addEventListener("click",function(){setView(t.dataset.v,true);});
+  t.addEventListener("keydown",function(e){
+    var i=VIEWS.indexOf(state.view);
+    if(e.key==="ArrowRight"){e.preventDefault(); setView(VIEWS[(i+1)%VIEWS.length],true); document.getElementById("t-"+state.view).focus();}
+    if(e.key==="ArrowLeft"){e.preventDefault(); setView(VIEWS[(i+VIEWS.length-1)%VIEWS.length],true); document.getElementById("t-"+state.view).focus();}
+  });
 });
-document.getElementById("q").addEventListener("input",function(e){state.q=e.target.value.toLowerCase(); render();});
-document.getElementById("expand").addEventListener("click",function(){
-  var ds=document.querySelectorAll("#local details"); var open=!ds[0]||!ds[0].open;
-  ds.forEach(function(d){d.open=open;}); this.textContent=open?"Contraer todo":"Expandir todo";});
+window.addEventListener("hashchange",function(){setView(location.hash.slice(1),false);});
 
+/* ---------- busqueda y atajos ---------- */
+var q=document.getElementById("q");
+q.addEventListener("input",function(){state.q=q.value.toLowerCase(); render();});
+document.addEventListener("keydown",function(e){
+  if(e.key==="/" && document.activeElement!==q && !/input|textarea/i.test(document.activeElement.tagName)){e.preventDefault(); q.focus();}
+  if(e.key==="Escape" && document.activeElement===q){q.value=""; state.q=""; render(); q.blur();}
+});
 function matches(parts){
   if(!state.q) return true;
   return parts.join(" ").toLowerCase().indexOf(state.q)>=0;
 }
+
+/* ---------- boton expandir/contraer (vista local) ---------- */
+document.getElementById("toggle").addEventListener("click",function(){
+  var ds=document.querySelectorAll("#v-local details"); if(!ds.length) return;
+  var open=!ds[0].open; ds.forEach(function(d){d.open=open;});
+  this.textContent=open?"Contraer todo":"Expandir todo";
+});
+
+/* ---------- utilidades de tabla ---------- */
 function copyBtn(text){
   var b=el("button",null,"Copiar"); b.type="button";
   b.addEventListener("click",function(){
-    function done(ok){b.textContent=ok?"Copiado":"Selecciona y copia"; setTimeout(function(){b.textContent="Copiar";},1500);}
+    function done(ok){b.textContent=ok?"Copiado ✓":"Selecciona y copia"; setTimeout(function(){b.textContent="Copiar";},1500);}
     if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(function(){done(true);},function(){done(false);});}
     else{var t=document.createElement("textarea"); t.value=text; document.body.appendChild(t); t.select();
       var ok=false; try{ok=document.execCommand("copy");}catch(e){} document.body.removeChild(t); done(ok);}
   });
   return b;
 }
-function table(cols, rows){
-  var t=el("table"); var hr=el("tr"); cols.forEach(function(c){var h=el("th",null,c.h); hr.appendChild(h);});
-  var thead=el("thead"); thead.appendChild(hr); t.appendChild(thead);
+function table(cols, rows, sortState, onSort){
+  var wrap=el("table"); var hr=el("tr");
+  cols.forEach(function(c){
+    var th=el("th", c.det?"det":null);
+    if(c.sort && onSort){
+      var btn=el("button",null, c.h + (sortState && sortState.k===c.sort ? (sortState.dir>0?" ↑":" ↓") : ""));
+      btn.type="button"; btn.addEventListener("click",function(){onSort(c.sort);}); th.appendChild(btn);
+    } else th.textContent=c.h;
+    hr.appendChild(th);
+  });
+  var thead=el("thead"); thead.appendChild(hr); wrap.appendChild(thead);
   var tb=el("tbody"); rows.forEach(function(r){var tr=el("tr");
-    cols.forEach(function(c){var td=el("td",c.num?"num":null); var v=c.f(r);
-      if(v instanceof Node) td.appendChild(v); else td.textContent=v; tr.appendChild(td);}); tb.appendChild(tr);});
-  t.appendChild(tb); return t;
+    cols.forEach(function(c){
+      var td=el("td", (c.num?"num ":"")+(c.nw?"nw ":"")+(c.det?"det":"")); var v=c.f(r);
+      if(v instanceof Node) td.appendChild(v); else td.textContent=v; tr.appendChild(td);});
+    tb.appendChild(tr);});
+  wrap.appendChild(tb); return wrap;
 }
-function badge(text,cls){return el("span","badge "+(cls||""),text);}
-var STATUS_CLS={UPDATED:"ok",UP_TO_DATE:"ok",AHEAD:"warn",DIVERGED:"bad",DIRTY:"warn",BUSY:"warn",NO_REMOTE:"bad",REMOTE_MISSING:"bad",ARCHIVED:"",PINNED:"",NO_LOCAL:"warn",INTERRUPTED:"bad",AUTH_ERROR:"bad",NETWORK_ERROR:"warn",UNKNOWN:"warn"};
+function empty(box, text){ box.appendChild(el("div","empty",text)); }
 
-function render(){
-  document.querySelectorAll(".card").forEach(function(b){b.setAttribute("aria-pressed", b.dataset.k===state.kind?"true":"false");});
-  var show=function(k){return !state.kind||state.kind===k;};
-  var secs=[["h-local","local",show("local")],["h-only","only",show("only")],["h-dirty","dirty",show("dirty")||show("soiled")||show("blocked")],["h-all","all",!state.kind||state.kind==="soiled"||state.kind==="blocked"]];
-  secs.forEach(function(s){var vis=s[2]; document.getElementById(s[0]).hidden=!vis; document.getElementById(s[1]).hidden=!vis;});
-
-  // 1. commits solo locales, agrupados por repo
-  var box=document.getElementById("local"); clear(box);
+/* ---------- vista 1: commits solo locales ---------- */
+function renderLocal(){
+  var box=document.getElementById("v-local"); clear(box);
   var byRepo={}; live.forEach(function(r){
     if(!matches([r.repo,r.branch].concat(r.subjects))) return; (byRepo[r.repo]=byRepo[r.repo]||[]).push(r);});
-  var names=Object.keys(byRepo).sort(function(a,b){
-    return (unpubOf[b]||0)-(unpubOf[a]||0);});
-  if(!names.length) box.appendChild(el("div","empty","Nada que mostrar: no hay commits solo locales con este filtro."));
+  var names=Object.keys(byRepo).sort(function(a,b){return (unpubOf[b]||0)-(unpubOf[a]||0);});
+  if(!names.length){ empty(box, live.length?"Nada con este filtro.":"No hay commits solo locales. Todo está subido. ✓"); return; }
+  box.appendChild(el("p","hint", names.length+" repo(s), "+names.reduce(function(a,n){return a+byRepo[n].length;},0)+" rama(s). Abre un repo para ver sus ramas y el comando de subida."));
   names.forEach(function(n){
     var rs=byRepo[n]; var tot=unpubOf[n]||0;
-    var d=el("details","repo"); var sm=el("summary");
-    sm.appendChild(el("span","rname",n)); sm.appendChild(badge("+"+tot+" commits únicos","warn"));
+    var d=el("details","repo"); if(state.q || names.length===1) d.open=true;
+    var sm=el("summary");
+    sm.appendChild(el("span","rname",n)); sm.appendChild(badge("+"+tot+" únicos","warn"));
     sm.appendChild(el("span","muted",rs.length+" rama"+(rs.length>1?"s":"")));
     d.appendChild(sm);
     rs.forEach(function(r){
       var b=el("div","branch"); var row=el("div","brow");
       row.appendChild(el("span","bname",r.branch)); row.appendChild(badge("+"+r.n,"warn"));
-      row.appendChild(r.kind==="sin_upstream"?badge("sin upstream · nunca subida","bad"):badge("adelantada de "+r.upstream,"warn"));
+      row.appendChild(r.kind==="sin_upstream"?badge("nunca subida","bad"):badge("adelantada de "+r.upstream,"warn"));
       row.appendChild(el("span","muted",r.date+(r.open?" · abierta en un checkout":"")));
       b.appendChild(row);
       var ul=el("ul","subj"); r.subjects.forEach(function(sj){ul.appendChild(el("li",null,sj));});
@@ -200,42 +272,93 @@ function render(){
     });
     box.appendChild(d);
   });
+}
 
-  // 2. única copia
-  var ob=document.getElementById("only"); clear(ob);
-  var orows=only.filter(function(r){return matches([r.repo,r.kind]);});
-  if(!orows.length) ob.appendChild(el("div","empty","Nada que mostrar."));
-  else ob.appendChild(table([
+/* ---------- vista 2: unica copia ---------- */
+function renderOnly(){
+  var box=document.getElementById("v-only"); clear(box);
+  var rows=only.filter(function(r){return matches([r.repo,r.kind]);});
+  box.appendChild(el("p","hint","Repos sin un lugar donde subirlos. Si el remoto se borró a propósito, márcalo con git-autosync archive.")); 
+  if(!rows.length){ empty(box, only.length?"Nada con este filtro.":"Ningún repo es única copia."); return; }
+  var tw=el("div","tw");
+  tw.appendChild(table([
     {h:"Repo",f:function(r){return r.repo;}},
-    {h:"Tipo",f:function(r){return badge({sin_remoto:"sin remoto",archivado:"archivado",remoto_caido:"remoto caído"}[r.kind],r.kind==="archivado"?"":"bad");}},
+    {h:"Tipo",f:function(r){return badge({sin_remoto:"sin remoto",archivado:"archivado",remoto_caido:"remoto caído"}[r.kind],r.kind==="archivado"?"none":"bad");}},
     {h:"Commits",num:1,f:function(r){return String(r.commits);}},
-    {h:"Último",f:function(r){return r.date||"-";}}], orows));
+    {h:"Último",nw:1,f:function(r){return r.date||"-";}}], rows));
+  box.appendChild(tw);
+}
 
-  // 3. sucios
-  var db=document.getElementById("dirty"); clear(db);
-  var drows=dirty.filter(function(r){return matches([r.name,r.status]);}).sort(function(a,b){return b.mod-a.mod;});
-  if(!drows.length) db.appendChild(el("div","empty","Nada que mostrar."));
-  else db.appendChild(table([
+/* ---------- vista 3: sin commitear ---------- */
+function renderDirty(){
+  var box=document.getElementById("v-dirty"); clear(box);
+  var rows=dirty.filter(function(r){return matches([r.name,r.status]);}).sort(function(a,b){return b.mod-a.mod;});
+  if(!rows.length){ empty(box, dirty.length?"Nada con este filtro.":"Ningún checkout tiene cambios sin commitear. ✓"); return; }
+  var tw=el("div","tw");
+  tw.appendChild(table([
     {h:"Repo",f:function(r){return r.name;}},
     {h:"Modificados",num:1,f:function(r){return String(r.mod);}},
     {h:"Sin rastrear",num:1,f:function(r){return String(r.untracked);}},
     {h:"Stash",num:1,f:function(r){return String(r.stash);}},
-    {h:"Estado",f:function(r){return badge(r.status,STATUS_CLS[r.status]);}}], drows));
-
-  // 4. todos
-  var ab=document.getElementById("all"); clear(ab);
-  var base = state.kind==="soiled"?soiled:state.kind==="blocked"?blocked:D.repos;
-  var arows=base.filter(function(r){return matches([r.name,r.status,r.reason]);});
-  ab.appendChild(table([
-    {h:"Repo",f:function(r){return r.name;}},
-    {h:"Estado",f:function(r){return badge(r.status,STATUS_CLS[r.status]);}},
-    {h:"Rama",f:function(r){return r.default||"-";}},
-    {h:"Commits",num:1,f:function(r){return String(r.commits);}},
-    {h:"Solo local",num:1,f:function(r){return String(r.unpub);}},
-    {h:"Último",f:function(r){return r.last||"-";}},
-    {h:"Detalle",f:function(r){return r.reason||"";}}], arows));
+    {h:"Estado",nw:1,f:function(r){return badge(r.status,STATUS_CLS[r.status]);}}], rows));
+  box.appendChild(tw);
 }
-render();
+
+/* ---------- vista 4: todos los repos, con filtro por estado y orden ---------- */
+var CHIPS=[
+  {k:"problemas",l:"Con problemas",f:function(r){return PROBLEM[r.status]===1;}},
+  {k:"todos",l:"Todos",f:function(){return true;}},
+  {k:"ok",l:"Al día",f:function(r){return r.status==="UP_TO_DATE"||r.status==="UPDATED";}},
+  {k:"sinremoto",l:"Sin remoto",f:function(r){return r.status==="NO_REMOTE";}},
+  {k:"archivado",l:"Archivados",f:function(r){return r.status==="ARCHIVED";}},
+  {k:"otros",l:"Otros",f:function(r){return PROBLEM[r.status]!==1 && ["UP_TO_DATE","UPDATED","NO_REMOTE","ARCHIVED"].indexOf(r.status)<0;}}
+];
+function renderChips(){
+  var box=document.getElementById("chips"); clear(box);
+  CHIPS.forEach(function(c){
+    var n=D.repos.filter(c.f).length;
+    var b=el("button","chip",c.l+" ("+n+")"); b.type="button";
+    b.setAttribute("aria-pressed", state.chip===c.k?"true":"false");
+    b.addEventListener("click",function(){state.chip=c.k; renderAll();});
+    box.appendChild(b);
+  });
+}
+function renderAll(){
+  renderChips();
+  var box=document.getElementById("all"); clear(box);
+  var fdef=CHIPS.filter(function(c){return c.k===state.chip;})[0]||CHIPS[0];
+  var rows=D.repos.filter(function(r){return fdef.f(r) && matches([r.name,r.status,r.reason,r.default]);});
+  rows.sort(function(a,b){
+    var s=state.sort, va, vb;
+    if(s.k==="prio"){va=prio(a.status); vb=prio(b.status); return (va-vb) || a.name.localeCompare(b.name);}
+    if(s.k==="name"){return s.dir*a.name.localeCompare(b.name);}
+    if(s.k==="unpub"){return s.dir*((a.unpub||0)-(b.unpub||0));}
+    if(s.k==="last"){return s.dir*String(a.last||"").localeCompare(String(b.last||""));}
+    return 0;
+  });
+  if(!rows.length){ empty(box,"Nada con este filtro."); return; }
+  box.appendChild(table([
+    {h:"Repo",sort:"name",f:function(r){return r.name;}},
+    {h:"Estado",sort:"prio",nw:1,f:function(r){return badge(r.status,STATUS_CLS[r.status]);}},
+    {h:"Rama",nw:1,f:function(r){return r.default||"-";}},
+    {h:"Solo local",sort:"unpub",num:1,f:function(r){return String(r.unpub||0);}},
+    {h:"Último",sort:"last",nw:1,f:function(r){return r.last||"-";}},
+    {h:"Detalle",det:1,f:function(r){return r.reason||"";}}
+  ], rows, state.sort, function(k){
+    state.sort = (state.sort.k===k) ? {k:k, dir:-state.sort.dir} : {k:k, dir:(k==="last"||k==="unpub")?-1:1};
+    renderAll();
+  }));
+}
+
+function render(){
+  if(state.view==="local") renderLocal();
+  else if(state.view==="only") renderOnly();
+  else if(state.view==="dirty") renderDirty();
+  else renderAll();
+}
+
+/* arranque: pestana desde la URL (#local, #only, #dirty, #all) */
+setView(location.hash.slice(1), false);
 })();
 </script>
 </body>
