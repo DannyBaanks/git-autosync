@@ -59,6 +59,7 @@ button.b:hover{border-color:var(--accent)}
 .badge.warn{background:var(--warn-bg);color:var(--warn)}
 .badge.bad{background:var(--bad-bg);color:var(--bad)}
 .badge.ok{background:var(--ok-bg);color:var(--ok)}
+.badge.info{background:var(--accent-bg);color:var(--accent)}
 .badge.none{background:var(--code-bg);color:var(--muted)}
 .muted{color:var(--muted);font-size:13px}
 ul.subj{margin:6px 0 6px 18px;padding:0;font-size:13px}
@@ -94,10 +95,10 @@ footer{margin-top:24px;color:var(--muted);font-size:12px}
     <div class="sub" id="meta"></div>
   </div>
   <div class="tabs" role="tablist" aria-label="Vistas">
-    <button class="tab" role="tab" id="t-local" data-v="local" aria-controls="v-local">Solo local <span class="c" id="c-local"></span></button>
-    <button class="tab" role="tab" id="t-only" data-v="only" aria-controls="v-only">Única copia <span class="c" id="c-only"></span></button>
-    <button class="tab" role="tab" id="t-dirty" data-v="dirty" aria-controls="v-dirty">Sin commitear <span class="c" id="c-dirty"></span></button>
-    <button class="tab" role="tab" id="t-all" data-v="all" aria-controls="v-all">Todos los repos <span class="c" id="c-all"></span></button>
+    <button class="tab" role="tab" id="t-local" data-v="local" aria-controls="v-local" title="Repos con commits que no están en ningún remoto">Solo local <span class="c" id="c-local"></span></button>
+    <button class="tab" role="tab" id="t-only" data-v="only" aria-controls="v-only" title="Repos sin remoto, archivados o con remoto caído">Única copia <span class="c" id="c-only"></span></button>
+    <button class="tab" role="tab" id="t-dirty" data-v="dirty" aria-controls="v-dirty" title="Repos con cambios sin commitear">Sin commitear <span class="c" id="c-dirty"></span></button>
+    <button class="tab" role="tab" id="t-all" data-v="all" aria-controls="v-all" title="Todos los repos sincronizados">Todos los repos <span class="c" id="c-all"></span></button>
   </div>
   <div class="tools">
     <input type="search" id="q" placeholder="Buscar… (tecla /)" aria-label="Buscar en esta vista">
@@ -156,7 +157,7 @@ var dirty = D.repos.filter(function(r){return r.mod>0;});
 var PRIO = {REMOTE_MISSING:0,AUTH_ERROR:0,INTERRUPTED:1,DIVERGED:1,BUSY:2,DIRTY:2,AHEAD:3,NO_LOCAL:4,NO_REMOTE:4,UNKNOWN:4,NETWORK_ERROR:5,PINNED:6,ARCHIVED:7,UP_TO_DATE:8,UPDATED:8};
 function prio(s){return PRIO[s]===undefined?9:PRIO[s];}
 var PROBLEM = {REMOTE_MISSING:1,AUTH_ERROR:1,INTERRUPTED:1,DIVERGED:1,BUSY:1,DIRTY:1,AHEAD:1,UNKNOWN:1,NETWORK_ERROR:1};
-var STATUS_CLS={UPDATED:"ok",UP_TO_DATE:"ok",AHEAD:"warn",DIVERGED:"bad",DIRTY:"warn",BUSY:"warn",NO_REMOTE:"none",REMOTE_MISSING:"bad",ARCHIVED:"",PINNED:"none",NO_LOCAL:"none",INTERRUPTED:"bad",AUTH_ERROR:"bad",NETWORK_ERROR:"warn",UNKNOWN:"warn"};
+var STATUS_CLS={UPDATED:"ok",UP_TO_DATE:"ok",AHEAD:"warn",DIVERGED:"info",DIRTY:"warn",BUSY:"warn",NO_REMOTE:"none",REMOTE_MISSING:"bad",ARCHIVED:"",PINNED:"none",NO_LOCAL:"none",INTERRUPTED:"bad",AUTH_ERROR:"bad",NETWORK_ERROR:"warn",UNKNOWN:"warn"};
 
 /* ---------- pestanas y contadores ---------- */
 var COUNTS = {local:nCommits+" commits", only:only.length, dirty:dirty.length, all:D.repos.length};
@@ -306,12 +307,12 @@ function renderDirty(){
 
 /* ---------- vista 4: todos los repos, con filtro por estado y orden ---------- */
 var CHIPS=[
-  {k:"problemas",l:"Con problemas",f:function(r){return PROBLEM[r.status]===1;}},
+  {k:"problemas",l:"Divergentes o adelantadas",f:function(r){return r.status==="DIVERGED"||r.status==="AHEAD";}},
   {k:"todos",l:"Todos",f:function(){return true;}},
   {k:"ok",l:"Al día",f:function(r){return r.status==="UP_TO_DATE"||r.status==="UPDATED";}},
   {k:"sinremoto",l:"Sin remoto",f:function(r){return r.status==="NO_REMOTE";}},
   {k:"archivado",l:"Archivados",f:function(r){return r.status==="ARCHIVED";}},
-  {k:"otros",l:"Otros",f:function(r){return PROBLEM[r.status]!==1 && ["UP_TO_DATE","UPDATED","NO_REMOTE","ARCHIVED"].indexOf(r.status)<0;}}
+  {k:"otros",l:"Otros estados",f:function(r){return ["UP_TO_DATE","UPDATED","NO_REMOTE","ARCHIVED","DIVERGED","AHEAD"].indexOf(r.status)<0;}}
 ];
 function renderChips(){
   var box=document.getElementById("chips"); clear(box);
@@ -341,7 +342,7 @@ function renderAll(){
     {h:"Repo",sort:"name",f:function(r){return r.name;}},
     {h:"Estado",sort:"prio",nw:1,f:function(r){return badge(r.status,STATUS_CLS[r.status]);}},
     {h:"Rama",nw:1,f:function(r){return r.default||"-";}},
-    {h:"Solo local",sort:"unpub",num:1,f:function(r){return String(r.unpub||0);}},
+    {h:"Commits sin subir",sort:"unpub",num:1,nw:1,f:function(r){return String(r.unpub||0);}},
     {h:"Último",sort:"last",nw:1,f:function(r){return r.last||"-";}},
     {h:"Detalle",det:1,f:function(r){return r.reason||"";}}
   ], rows, state.sort, function(k){
