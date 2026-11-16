@@ -30,7 +30,7 @@ Nunca: `reset`, `clean`, `stash`, `rebase`, `push`, `checkout`/`switch`, merge c
 | `DIRTY` | cambios sin commit, o un archivo local chocaría con lo que llega |
 | `BUSY` | otro proceso usa el checkout, hay un lock, o algo cambió durante la corrida |
 | `PINNED` | repo fijado: solo fetch |
-| `ARCHIVED` | remoto borrado a propósito: no se contacta; esta copia es la única |
+| `ARCHIVED` | remoto borrado a propósito, o repo que vive en `Archive/`: no se contacta GitHub; la copia local puede ser la única |
 | `NO_REMOTE`, `REMOTE_MISSING`, `AUTH_ERROR`, `NETWORK_ERROR`, `NO_LOCAL`, `UNKNOWN`, `INTERRUPTED` | se omiten, con el motivo |
 
 ## Reporte diario (solo lectura)
@@ -62,6 +62,8 @@ git-autosync log [N] [--all]    # historial de cambios de estado
 git-autosync --dry-run          # solo observa (ls-remote): no escribe nada
 git-autosync report             # el reporte de arriba
 git-autosync archive <Carpeta>  # remoto borrado a propósito (p.ej. hackathon terminado)
+git-autosync archive --move <Carpeta>...        # manifiesto: qué se movería a <root>/Archive/ (no mueve nada)
+git-autosync archive --move --yes <Carpeta>...  # lo ejecuta (rename atómico, verifica HEAD y estado)
 ```
 
 ## Configuración (`~/.config/git-autosync/`, una entrada por línea)
